@@ -1,3 +1,12 @@
+# Capon beamformer with Kalman filter
+
+To build Stone Soup use the command `python -m pip install -e .[dev]`.
+
+To run the Capon beamformer / Kalman filter examples, use the commands:
+
+`python run_2dcapon_kf.py --datafile=1_target_theta0p8_phi0p2_omega50_noise0.csv`
+`python run_2dcapon_kf.py --datafile=1_target_theta0p8_phi0p2_omega50_noise0p1.csv`
+
 # Stone Soup
 [![CircleCI branch](https://img.shields.io/circleci/project/github/dstl/Stone-Soup/master.svg?label=tests&style=flat)](https://circleci.com/gh/dstl/Stone-Soup)
 [![Codecov](https://img.shields.io/codecov/c/github/dstl/Stone-Soup.svg)](https://codecov.io/gh/dstl/Stone-Soup)
