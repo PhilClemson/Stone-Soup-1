@@ -21,13 +21,12 @@ from datetime import datetime
 from datetime import timedelta
 
 import numpy as np
-from matplotlib import pyplot as plt
 
 from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel, \
                                                ConstantVelocity
 from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
 
-# np.random.seed(1991)
+np.random.seed(1991)
 
 start_time = datetime.now()
 truths = set()  # Truths across all time
@@ -57,18 +56,10 @@ for k in range(20):
         current_truths.add(truth)
         truths.add(truth)
 
-
-fig = plt.figure(figsize=(10, 6))
-ax = fig.add_subplot(1, 1, 1)
-ax.set_xlabel("$x$")
-ax.set_ylabel("$y$")
-ax.set_ylim(-5, 25)
-ax.set_xlim(-5, 25)
-
-for truth in truths:
-    ax.plot([state.state_vector[0] for state in truth],
-            [state.state_vector[2] for state in truth],
-            linestyle="--",)
+from stonesoup.plotter import Plotter
+plotter = Plotter()
+plotter.ax.set_ylim(-5, 25)
+plotter.plot_ground_truths(truths, [0, 2])
 
 # %%
 # Generate Detections and Clutter
@@ -104,7 +95,8 @@ for k in range(20):
             measurement = measurement_model.function(truth_state, noise=True)
             measurement_set.add(TrueDetection(state_vector=measurement,
                                               groundtruth_path=truth,
-                                              timestamp=truth_state.timestamp))
+                                              timestamp=truth_state.timestamp,
+                                              measurement_model=measurement_model))
 
             # Generate clutter at this time-step
             truth_x = truth_state.state_vector[0]
@@ -112,21 +104,13 @@ for k in range(20):
             for _ in range(np.random.randint(2)):
                 x = uniform.rvs(truth_x - 10, 20)
                 y = uniform.rvs(truth_y - 10, 20)
-                measurement_set.add(Clutter(np.array([[x], [y]]), timestamp=timestamp))
+                measurement_set.add(Clutter(np.array([[x], [y]]), timestamp=timestamp,
+                                            measurement_model=measurement_model))
     all_measurements.append(measurement_set)
 
-# Plot detections and clutter
-for set_ in all_measurements:
-    # Plot actual detections.
-    ax.scatter([state.state_vector[0] for state in set_ if isinstance(state, TrueDetection)],
-               [state.state_vector[1] for state in set_ if isinstance(state, TrueDetection)],
-               color='g')
-    # Plot clutter.
-    ax.scatter([state.state_vector[0] for state in set_ if isinstance(state, Clutter)],
-               [state.state_vector[1] for state in set_ if isinstance(state, Clutter)],
-               color='y',
-               marker='2')
-fig
+# Plot true detections and clutter.
+plotter.plot_measurements(all_measurements, [0, 2], color='g')
+plotter.fig
 
 # %%
 # Creating a Tracker
@@ -155,7 +139,7 @@ data_associator = GNNWith2DAssignment(hypothesiser)
 # your state vector. So the higher the threshold value, the longer tracks that haven't been
 # updated will remain.
 from stonesoup.deleter.error import CovarianceBasedDeleter
-deleter = CovarianceBasedDeleter(4)
+deleter = CovarianceBasedDeleter(covar_trace_thresh=4)
 
 # %%
 # Creating an Initiator
@@ -212,30 +196,13 @@ for n, measurements in enumerate(all_measurements):
 
     # Carry out deletion and initiation
     tracks -= deleter.delete_tracks(tracks)
-    tracks |= initiator.initiate(measurements - associated_measurements)
+    tracks |= initiator.initiate(measurements - associated_measurements,
+                                 start_time + timedelta(seconds=n))
 
 # %%
 # Plot the resulting tracks.
-from matplotlib.patches import Ellipse
-
-tracks_list = list(tracks)
-for track in tracks:
-    # Plot track.
-    ax.plot([state.state_vector[0, 0] for state in track],
-            [state.state_vector[2, 0] for state in track],
-            marker=".")
-
-    for state in track[1:]:  # Skip the prior
-        w, v = np.linalg.eig(measurement_model.matrix()@state.covar@measurement_model.matrix().T)
-        max_ind = np.argmax(w)
-        min_ind = np.argmin(w)
-        orient = np.arctan2(v[1, max_ind], v[0, max_ind])
-        ellipse = Ellipse(xy=state.state_vector[(0, 2), 0],
-                          width=2*np.sqrt(w[max_ind]),
-                          height=2*np.sqrt(w[min_ind]),
-                          angle=np.rad2deg(orient),
-                          alpha=0.2)
-        ax.add_artist(ellipse)
-fig
 
 # sphinx_gallery_thumbnail_number = 3
+
+plotter.plot_tracks(tracks, [0, 2], uncertainty=True)
+plotter.fig

@@ -5,6 +5,7 @@ import numpy as np
 import scipy.linalg
 import pytest
 
+from stonesoup.base import Property
 from ..angle import Bearing
 from ..array import StateVector, CovarianceMatrix
 from ..numeric import Probability
@@ -99,9 +100,33 @@ def test_weighted_gaussian_state():
     mean = StateVector([[1], [2], [3], [4]])  # 4D
     covar = CovarianceMatrix(np.diag([1, 2, 3]))  # 3D
     weight = 0.3
+    timestamp = datetime.datetime.now()
     with pytest.raises(ValueError):
-        a = WeightedGaussianState(mean, covar, weight)
-        assert a.weight == weight
+        WeightedGaussianState(mean, covar, timestamp, weight)
+
+    # Test initialization using a GuassianState
+    mean = StateVector([[1], [2], [3], [4]])  # 4D
+    covar = CovarianceMatrix(np.diag([1, 2, 3, 4]))
+    weight = 0.3
+    gs = GaussianState(mean, covar, timestamp=timestamp)
+    wgs = WeightedGaussianState.from_gaussian_state(gaussian_state=gs, weight=weight)
+    assert np.array_equal(gs.state_vector, wgs.state_vector)
+    assert np.array_equal(gs.covar, wgs.covar)
+    assert gs.timestamp == wgs.timestamp
+    assert weight == wgs.weight
+    assert wgs.state_vector is not gs.state_vector
+    assert wgs.covar is not gs.covar
+
+    # Test copy flag
+    wgs = WeightedGaussianState.from_gaussian_state(gaussian_state=gs, copy=False)
+    assert wgs.state_vector is gs.state_vector
+    assert wgs.covar is gs.covar
+
+    # Test gaussian_state property
+    gs2 = wgs.gaussian_state
+    assert np.array_equal(gs.state_vector, gs2.state_vector)
+    assert np.array_equal(gs.covar, gs2.covar)
+    assert gs.timestamp == gs2.timestamp
 
 
 def test_particlestate():
@@ -141,6 +166,8 @@ def test_particlestate():
         state_vector2, weight=weight) for _ in range(num_particles//2))
 
     state = ParticleState(particles)
+    assert isinstance(state, State)
+    assert ParticleState in State.subclasses
     assert np.allclose(state.state_vector, StateVector([[50], [100]]))
     assert np.allclose(state.covar, CovarianceMatrix([[2500, 5000], [5000, 10000]]))
 
@@ -228,8 +255,92 @@ def test_state_mutable_sequence_slice():
 
     assert sequence[timestamp] == sequence.states[0]
 
+    end_timestamp = sequence.timestamp
+    assert sequence[end_timestamp] == sequence.states[-1]
+    assert sequence[end_timestamp].state_vector == StateVector([[0]])
+
+    # Add state at same time
+    sequence.append(State(state_vector + 1, timestamp=end_timestamp))
+    assert sequence[end_timestamp]
+    assert sequence[end_timestamp].state_vector == StateVector([[1]])
+
+    assert len(sequence) == 11
+    assert len(list(sequence.last_timestamp_generator())) == 10
+
     with pytest.raises(TypeError):
         sequence[timestamp:1]
 
     with pytest.raises(IndexError):
         sequence[timestamp-delta]
+
+
+def test_state_mutable_sequence_sequence_init():
+    """Test initialising with an existing sequence"""
+    state_vector = StateVector([[0]])
+    timestamp = datetime.datetime(2018, 1, 1, 14)
+    delta = datetime.timedelta(minutes=1)
+    sequence = StateMutableSequence(
+        StateMutableSequence([State(state_vector, timestamp=timestamp + delta * n)
+                              for n in range(10)]))
+
+    assert not isinstance(sequence.states, list)
+
+    assert sequence.state is sequence.states[-1]
+    assert np.array_equal(sequence.state_vector, state_vector)
+    assert sequence.timestamp == timestamp + delta * 9
+
+    del sequence[-1]
+    assert sequence.timestamp == timestamp + delta * 8
+
+
+def test_state_mutable_sequence_error_message():
+    """Test that __getattr__ doesn't incorrectly identify the source of a missing attribute"""
+
+    class TestSMS(StateMutableSequence):
+        test_property: int = Property(default=3)
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.test_variable = 5
+
+        def test_method(self):
+            pass
+
+        @property
+        def complicated_attribute(self):
+            if self.test_property == 3:
+                return self.test_property
+            else:
+                raise AttributeError('Custom error message')
+
+    timestamp = datetime.datetime.now()
+    test_obj = TestSMS(states=State(state_vector=StateVector([1, 2, 3]), timestamp=timestamp))
+
+    # First check no errors on assigned vars
+    test_obj.test_method()
+    assert test_obj.test_property == 3
+    test_obj.test_property = 6
+    assert test_obj.test_property == 6
+    assert test_obj.test_variable == 5
+
+    # Now check that state variables are proxied correctly
+    assert np.array_equal(test_obj.state_vector, StateVector([1, 2, 3]))
+    assert test_obj.timestamp == timestamp
+
+    # Now check that the right error messages are raised on missing attributes
+    with pytest.raises(AttributeError, match="'TestSMS' object has no attribute 'missing_method'"):
+        test_obj.missing_method()
+
+    with pytest.raises(AttributeError, match="'TestSMS' object has no attribute "
+                                             "'missing_variable'"):
+        _ = test_obj.missing_variable
+
+    # And check custom error messages are not swallowed
+    # in the default case (test_property == 3), complicated_attribute works
+    test_obj.test_property = 3
+    assert test_obj.complicated_attribute == 3
+
+    # when test_property != 3  it raises a custom error.
+    test_obj.test_property = 5
+    with pytest.raises(AttributeError, match="Custom error message"):
+        _ = test_obj.complicated_attribute

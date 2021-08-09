@@ -1,13 +1,37 @@
 import pytest
 import numpy as np
 from numpy import deg2rad
-from pytest import approx
+from scipy.linalg import cholesky, LinAlgError
+from pytest import approx, raises
 
-from ..functions import (
-    jacobian, gm_reduce_single, mod_bearing, mod_elevation, gauss2sigma,
-    rotx, roty, rotz, cart2sphere, cart2angles, pol2cart, sphere2cart)
-from ..types.array import StateVector, StateVectors
-from ..types.state import State, GaussianState
+from .. import (
+    cholesky_eps, jacobian, gm_reduce_single, mod_bearing, mod_elevation, gauss2sigma,
+    rotx, roty, rotz, cart2sphere, cart2angles, pol2cart, sphere2cart, dotproduct)
+from ...types.array import StateVector, StateVectors, Matrix
+from ...types.state import State, GaussianState
+
+
+def test_cholesky_eps():
+    matrix = np.array([[0.4, -0.2, 0.1],
+                       [0.3, 0.1, -0.2],
+                       [-0.3, 0.0, 0.4]])
+    matrix = matrix@matrix.T
+
+    cholesky_matrix = cholesky(matrix)
+
+    assert cholesky_eps(matrix) == approx(cholesky_matrix)
+    assert cholesky_eps(matrix, True) == approx(cholesky_matrix.T)
+
+
+def test_cholesky_eps_bad():
+    matrix = np.array(
+        [[ 0.05201447,  0.02882126, -0.00569971, -0.00733617],  # noqa: E201
+         [ 0.02882126,  0.01642966, -0.00862847, -0.00673035],  # noqa: E201
+         [-0.00569971, -0.00862847,  0.06570757,  0.03251551],
+         [-0.00733617, -0.00673035,  0.03251551,  0.01648615]])
+    with raises(LinAlgError):
+        cholesky(matrix)
+    cholesky_eps(matrix)
 
 
 def test_jacobian():
@@ -86,6 +110,13 @@ def test_gm_reduce_single():
     weights = np.array([1, 2, 5])
 
     mean, covar = gm_reduce_single(means, covars, weights)
+
+    assert np.allclose(mean, np.array([[4], [5]]))
+    assert np.allclose(covar, np.array([[3.675, 3.35],
+                                        [3.2, 3.3375]]))
+
+    # Test handling of means as array instead of StateVectors
+    mean, covar = gm_reduce_single(means.view(np.ndarray), covars, weights)
 
     assert np.allclose(mean, np.array([[4], [5]]))
     assert np.allclose(covar, np.array([[3.675, 3.35],
@@ -189,3 +220,33 @@ def test_cart_sphere_inversions(x, y, z):
     #   note, this only works correctly when z==0
     if z == 0:
         assert np.allclose(np.array([x, y]), pol2cart(rho, phi))
+
+
+@pytest.mark.parametrize(
+    "state_vector1, state_vector2",
+    [  # Cartesian values
+        (StateVector([2, 4]), StateVector([2, 1])),
+        (StateVector([-1, 1, -4]), StateVector([-2, 1, 1])),
+        (StateVector([-2, 0, 3, -1]), StateVector([1, 0, -1, 4])),
+        (StateVector([-1, 0]), StateVector([1, -2, 3])),
+        (Matrix([[1, 0], [0, 1]]), Matrix([[3, 1], [1, -3]]))
+     ]
+)
+def test_dotproduct(state_vector1, state_vector2):
+
+    # Test that they raise the right error if not 1d, i.e. vectors
+    if np.shape(state_vector1)[1] != 1 | np.shape(state_vector2)[1] != 1:
+        with pytest.raises(ValueError):
+            dotproduct(state_vector1, state_vector2)
+    else:
+        if len(state_vector1) != len(state_vector2):
+            # If they're different lengths check that the correct error is thrown
+            with pytest.raises(ValueError):
+                dotproduct(state_vector1, state_vector2)
+        else:
+            # This is what the dotproduct function actually does
+            out = 0
+            for a_i, b_i in zip(state_vector1, state_vector2):
+                out += a_i * b_i
+
+            assert dotproduct(state_vector1, state_vector2) == out

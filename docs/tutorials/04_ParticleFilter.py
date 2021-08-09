@@ -69,7 +69,6 @@
 # Import the necessary libraries
 
 import numpy as np
-from matplotlib import pyplot as plt
 
 from datetime import datetime
 from datetime import timedelta
@@ -98,15 +97,11 @@ for k in range(1, 21):
 
 # %%
 # Plot the ground truth.
-fig = plt.figure(figsize=(10, 6))
-ax = fig.add_subplot()
-ax.set_xlabel("$x$")
-ax.set_ylabel("$y$")
-ax.axis('equal')
 
-ax.plot([state.state_vector[0] for state in truth],
-        [state.state_vector[2] for state in truth],
-        linestyle="--")
+from stonesoup.plotter import Plotter
+plotter = Plotter()
+plotter.plot_ground_truths(truth, [0, 2])
+
 
 # %%
 # Initialise the bearing, range sensor using the appropriate measurement model.
@@ -128,17 +123,14 @@ measurement_model = CartesianToBearingRange(
 measurements = []
 for state in truth:
     measurement = measurement_model.function(state, noise=True)
-    measurements.append(Detection(measurement, timestamp=state.timestamp))
+    measurements.append(Detection(measurement, timestamp=state.timestamp,
+                                  measurement_model=measurement_model))
 
 # %%
-# Plot those detections
-from stonesoup.functions import pol2cart
+# Plot those measurements
 
-x, y = pol2cart(
-    np.hstack([state.state_vector[1, 0] for state in measurements]),
-    np.hstack([state.state_vector[0, 0] for state in measurements]))
-ax.scatter(x + sensor_x, y + sensor_y, color='b')
-fig
+plotter.plot_measurements(measurements, [0, 2])
+plotter.fig
 
 # %%
 # Set up the particle filter
@@ -167,23 +159,25 @@ updater = ParticleUpdater(measurement_model, resampler)
 
 from scipy.stats import multivariate_normal
 
-from stonesoup.types.particle import Particle
+from stonesoup.types.particle import Particles
 from stonesoup.types.numeric import Probability  # Similar to a float type
 from stonesoup.types.state import ParticleState
+from stonesoup.types.array import StateVectors
 
-number_particles = 200
+number_particles = 1000
 
 # Sample from the prior Gaussian distribution
 samples = multivariate_normal.rvs(np.array([0, 1, 0, 1]),
                                   np.diag([1.5, 0.5, 1.5, 0.5]),
                                   size=number_particles)
 
-particles = [
-    Particle(sample.reshape(-1, 1), weight=Probability(1/number_particles)) for sample in samples]
+# Create state vectors and weights for particles
+particles = Particles(state_vector=StateVectors(samples.T),
+                      weight=np.array([Probability(1/number_particles)]*number_particles)
+                      )
 
 # Create prior particle state.
 prior = ParticleState(particles, timestamp=start_time)
-
 # %%
 # Run the tracker
 # ^^^^^^^^^^^^^^^
@@ -202,16 +196,9 @@ for measurement in measurements:
 
 # %%
 # Plot the resulting track with the sample points at each iteration.
-ax.plot([state.state_vector[0, 0] for state in track],
-        [state.state_vector[2, 0] for state in track],
-        marker=".")
 
-for state in track:
-    data = np.array([particle.state_vector for particle in state.particles])
-    ax.plot(data[:, 0], data[:, 2], linestyle='', marker=".", markersize=1, alpha=0.5)
-fig
-
-# sphinx_gallery_thumbnail_number = 3
+plotter.plot_tracks(track, [0, 2], particle=True)
+plotter.fig
 
 # %%
 # Key points
@@ -231,3 +218,5 @@ fig
 #
 # .. [#] Carpenter J., Clifford P., Fearnhead P. 1999, An improved particle filter for non-linear
 #        problems, IEE Proc., Radar Sonar Navigation, 146:2–7
+
+# sphinx_gallery_thumbnail_number = 3

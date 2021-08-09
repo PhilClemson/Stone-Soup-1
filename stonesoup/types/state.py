@@ -7,9 +7,9 @@ import numpy as np
 import uuid
 
 from ..base import Property
-from .array import StateVector, StateVectors, CovarianceMatrix
+from .array import StateVector, CovarianceMatrix
 from .base import Type
-from .particle import Particle
+from .particle import Particles
 from .numeric import Probability
 
 
@@ -62,7 +62,7 @@ class StateMutableSequence(Type, abc.MutableSequence):
     def __init__(self, states=None, *args, **kwargs):
         if states is None:
             states = []
-        elif not isinstance(states, list):
+        elif not isinstance(states, abc.Sequence):
             # Ensure states is a list
             states = [states]
         super().__init__(states, *args, **kwargs)
@@ -94,7 +94,7 @@ class StateMutableSequence(Type, abc.MutableSequence):
                 items.append(state)
             return StateMutableSequence(items[::index.step])
         elif isinstance(index, datetime.datetime):
-            for state in self.states:
+            for state in reversed(self.states):
                 if state.timestamp == index:
                     return state
             else:
@@ -104,14 +104,31 @@ class StateMutableSequence(Type, abc.MutableSequence):
         else:
             return self.states.__getitem__(index)
 
-    def __getattr__(self, item):
-        if item.startswith("_"):
-            # Don't proxy special/private attributes to `state`
-            raise AttributeError(
-                "{!r} object has no attribute {!r}".format(
-                    type(self).__name__, item))
-        else:
-            return getattr(self.state, item)
+    def __getattribute__(self, name):
+        # This method is called if we try to access an attribute of self. First we try to get the
+        # attribute directly, but if that fails, we want to try getting the same attribute from
+        # self.state instead. If that, in turn,  fails we want to return the error message that
+        # would have originally been raised, rather than an error message that the State has no
+        # such attribute.
+        #
+        # An alternative mechanism using __getattr__ seems simpler (as it skips the first few lines
+        # of code, but __getattr__ has no mechanism to capture the originally raised error.
+        try:
+            # This tries first to get the attribute from self.
+            return Type.__getattribute__(self, name)
+        except AttributeError as original_error:
+            if name.startswith("_"):
+                # Don't proxy special/private attributes to `state`, just raise the original error
+                raise original_error
+            else:
+                # For non _ attributes, try to get the attribute from self.state instead of self.
+                try:
+                    my_state = Type.__getattribute__(self, 'state')
+                    return getattr(my_state, name)
+                except AttributeError:
+                    # If we get the error about 'State' not having the attribute, then we want to
+                    # raise the original error instead
+                    raise original_error
 
     def insert(self, index, value):
         return self.states.insert(index, value)
@@ -119,6 +136,28 @@ class StateMutableSequence(Type, abc.MutableSequence):
     @property
     def state(self):
         return self.states[-1]
+
+    def last_timestamp_generator(self):
+        """Generator yielding the last state for each timestamp
+
+        This provides a method of iterating over a sequence of states,
+        such that when multiple states for the same timestamp exist,
+        only the last state is yielded. This is particularly useful in
+        cases where you may have multiple :class:`~.Update` states for
+        a single timestamp e.g. multi-sensor tracking example.
+
+        Yields
+        ------
+        State
+            A state for each timestamp present in the sequence.
+        """
+        state_iter = iter(self)
+        current_state = next(state_iter)
+        for next_state in state_iter:
+            if next_state.timestamp > current_state.timestamp:
+                yield current_state
+            current_state = next_state
+        yield current_state
 
 
 class GaussianState(State):
@@ -130,7 +169,9 @@ class GaussianState(State):
     covar: CovarianceMatrix = Property(doc='Covariance matrix of state.')
 
     def __init__(self, state_vector, covar, *args, **kwargs):
-        covar = CovarianceMatrix(covar)
+        # Don't cast away subtype of covar if not necessary
+        if not isinstance(covar, CovarianceMatrix):
+            covar = CovarianceMatrix(covar)
         super().__init__(state_vector, covar, *args, **kwargs)
         if self.state_vector.shape[0] != self.covar.shape[0]:
             raise ValueError(
@@ -185,6 +226,48 @@ class WeightedGaussianState(GaussianState):
     """
     weight: Probability = Property(default=0, doc="Weight of the Gaussian State.")
 
+    @property
+    def gaussian_state(self):
+        """The Gaussian state."""
+        return GaussianState(self.state_vector,
+                             self.covar,
+                             timestamp=self.timestamp)
+
+    @classmethod
+    def from_gaussian_state(cls, gaussian_state, *args, copy=True, **kwargs):
+        r"""
+        Returns a WeightedGaussianState instance based on the gaussian_state.
+
+        Parameters
+        ----------
+        gaussian_state : :class:`~.GaussianState`
+            The guassian_state used to create the new WeightedGaussianState.
+        \*args : See main :class:`~.WeightedGaussianState`
+            args are passed to :class:`~.WeightedGaussianState` __init__()
+        copy : Boolean, optional
+            If True, the WeightedGaussianState is created with copies of the elements
+            of gaussian_state. The default is True.
+        \*\*kwargs : See main :class:`~.WeightedGaussianState`
+            kwargs are passed to :class:`~.WeightedGaussianState` __init__()
+
+        Returns
+        -------
+        :class:`~.WeightedGaussianState`
+            Instance of WeightedGaussianState.
+        """
+        state_vector = gaussian_state.state_vector
+        covar = gaussian_state.covar
+        timestamp = gaussian_state.timestamp
+        if copy:
+            state_vector = state_vector.copy()
+            covar = covar.copy()
+        return cls(
+            state_vector=state_vector,
+            covar=covar,
+            timestamp=timestamp,
+            *args, **kwargs
+        )
+
 
 class TaggedWeightedGaussianState(WeightedGaussianState):
     """Tagged Weighted Gaussian State Type
@@ -206,19 +289,28 @@ class ParticleState(Type):
     This is a particle state object which describes the state as a
     distribution of particles"""
 
-    particles: MutableSequence[Particle] = Property(doc='List of particles representing state')
+    particles: Particles = Property(doc='All particles.')
+    fixed_covar: CovarianceMatrix = Property(default=None,
+                                             doc='Fixed covariance value. Default `None`, where'
+                                                 'weighted sample covariance is then used.')
     timestamp: datetime.datetime = Property(default=None,
                                             doc="Timestamp of the state. Default None.")
 
+    def __init__(self, particles, *args, **kwargs):
+        if particles is not None and not isinstance(particles, Particles):
+            particles = Particles(particle_list=particles)
+        super().__init__(particles, *args, **kwargs)
+
     @property
     def ndim(self):
-        return self.particles[0].ndim
+        return self.particles.ndim
 
     @property
     def mean(self):
         """The state mean, equivalent to state vector"""
-        result = np.average(StateVectors([p.state_vector for p in self.particles]), axis=1,
-                            weights=[p.weight for p in self.particles])
+        result = np.average(self.particles.state_vector,
+                            axis=1,
+                            weights=self.particles.weight)
         # Convert type as may have type of weights
         return result
 
@@ -229,8 +321,9 @@ class ParticleState(Type):
 
     @property
     def covar(self):
-        cov = np.cov(StateVectors([p.state_vector for p in self.particles]),
-                     ddof=0, aweights=[p.weight for p in self.particles])
+        if self.fixed_covar is not None:
+            return self.fixed_covar
+        cov = np.cov(self.particles.state_vector, ddof=0, aweights=np.array(self.particles.weight))
         # Fix one dimensional covariances being returned with zero dimension
         return cov
 State.register(ParticleState)  # noqa: E305

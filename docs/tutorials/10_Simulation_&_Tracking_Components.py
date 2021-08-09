@@ -70,7 +70,7 @@ from stonesoup.models.transition.linear import (
 transition_model = CombinedLinearGaussianTransitionModel(
     [ConstantVelocity(0.05), ConstantVelocity(0.05)])
 
-## %
+# %%
 # Put this all together in a multi-target simulator.
 from stonesoup.simulator.simple import MultiTargetGroundTruthSimulator
 groundtruth_sim = MultiTargetGroundTruthSimulator(
@@ -158,12 +158,12 @@ data_associator = GNNWith2DAssignment(hypothesiser)
 # Create deleter - get rid of anything with a covariance trace greater than 2
 from stonesoup.deleter.error import CovarianceBasedDeleter
 covariance_limit_for_delete = 2
-deleter = CovarianceBasedDeleter(covariance_limit_for_delete)
+deleter = CovarianceBasedDeleter(covar_trace_thresh=covariance_limit_for_delete)
 
 # %%
 # Set a standard prior state and the minimum number of detections required to qualify for
 # initiation
-s_prior_state=GaussianState([[0], [0], [0], [0]], np.diag([0, 0.5, 0, 0.5]))
+s_prior_state = GaussianState([[0], [0], [0], [0]], np.diag([0, 0.5, 0, 0.5]))
 min_detections = 3
 
 # %%
@@ -196,6 +196,11 @@ tracker = MultiTargetTracker(
 )
 
 # %%
+# In the case of using (J)PDA like in :ref:`auto_tutorials/07_PDATutorial:Run the PDA Filter`
+# and :ref:`auto_tutorials/08_JPDATutorial:Running the JPDA filter`, then the
+# :class:`~.MultiTargetMixtureTracker` would be used instead on the
+# :class:`~.MultiTargetTracker` used above.
+#
 # Plot the outputs
 # ^^^^^^^^^^^^^^^^
 # We plot the output using a Stone Soup :class:`MetricGenerator` which does plots (in this instance
@@ -203,16 +208,16 @@ tracker = MultiTargetTracker(
 groundtruth = set()
 detections = set()
 tracks = set()
+
 for time, ctracks in tracker:
     groundtruth.update(groundtruth_sim.groundtruth_paths)
     detections.update(detection_sim.detections)
     tracks.update(ctracks)
 
 from stonesoup.metricgenerator.plotter import TwoDPlotter
-plotter = TwoDPlotter(track_indices=[0, 2], gtruth_indices=[0, 2], detection_indices=[0, 1])
+plotter = TwoDPlotter(track_indices=[0, 2], gtruth_indices=[0, 2], detection_indices=[0, 2])
 fig = plotter.plot_tracks_truth_detections(tracks, groundtruth, detections).value
 
 ax = fig.axes[0]
 ax.set_xlim([-30, 30])
 _ = ax.set_ylim([-30, 30])
-

@@ -36,6 +36,8 @@ def test_non_linear(model):
     assert np.array_equal(meas_vector,
                           np.array([[np.pi/2], [10], [-np.pi/2], [10]]))
 
+    assert model.mapping == [0, 1, 3, 4]
+
 
 def test_jacobian(model):
     state = State(StateVector([[10.0], [10.0], [0.0], [10.0], [0.0]]))
@@ -107,3 +109,15 @@ def test_mismatch_ndim_state():
             CartesianToBearingRange(3, [0, 1], np.diag([1, 10])),
             CartesianToBearingRange(4, [0, 1], np.diag([1, 10])),
         ])
+
+
+def test_none_covar():
+    new_model = CombinedReversibleGaussianMeasurementModel([
+        CartesianToBearingRange(4, [0, 1], None),
+        CartesianToBearingRange(4, [0, 1], np.diag([1, 10]))
+    ])
+
+    with pytest.raises(ValueError, match="Cannot generate rvs from None-type covariance"):
+        new_model.rvs()
+    with pytest.raises(ValueError, match="Cannot generate pdf from None-type covariance"):
+        new_model.pdf(State([0, 0, 0, 0]), State([0, 0, 0, 0]))
