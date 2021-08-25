@@ -123,7 +123,7 @@ class RadarRotatingBearingRange(RadarBearingRange):
         for truth in ground_truths:
             # Transform state to measurement space and generate
             # random noise
-            measurement_vector = measurement_model.function(truth, noise=noise, **kwargs)
+            measurement_vector = measurement_model.function(truth, noise=False, **kwargs)
 
             if noise is True:
                 measurement_noise = measurement_model.rvs()
@@ -162,6 +162,10 @@ class RadarRotatingBearingRange(RadarBearingRange):
         timestamp: :class:`datetime.datetime`
             A timestamp signifying when the rotation completes
         """
+
+        # Check if dwell_center has a timestamp instantiated if not sets it to incoming timestamp
+        if self.dwell_center.timestamp is None:
+            self.dwell_center.timestamp = timestamp
 
         # Compute duration since last rotation
         duration = timestamp - self.dwell_center.timestamp
