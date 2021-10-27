@@ -11,10 +11,13 @@ The relative sensor locations is passed to each algorithm in a separate string a
 listing the Cartesian coordinates.
 
 """
+import csv
+from itertools import islice
 import numpy as np
-import math
 import random
 import copy
+import math
+from pathlib import Path
 from datetime import datetime, timedelta
 from stonesoup.base import Property, Base
 from stonesoup.buffered_generator import BufferedGenerator
@@ -31,87 +34,106 @@ class CaponBeamformer(Base, BufferedGenerator):
     (1969)
 
     """
-    csv_path: str = Property(doc='The path to the csv file, containing the raw data')
-    start_index: int = Property(default=0, doc='Index of first sample of specified time window')
-    end_index: int = Property(default=0, doc='Index of last sample of specified time window (set\
-                              to 0 to import all data up to the end of the file)')
+    path: Path = Property(doc='The path to the csv file containing the raw data')
     fs: float = Property(doc='Sampling frequency (Hz)')
-    sensor_loc: list = Property(doc='Cartesian coordinates of the sensors in the format\
-                               "X1 Y1 Z1; X2 Y2 Z2;...."')
+    sensor_loc: np.ndarray = Property(doc='Cartesian coordinates of the sensors in the format '
+                                          '"X1 Y1 Z1; X2 Y2 Z2;...."') # This now expects the full set of locations
     omega: float = Property(doc='Signal frequency (Hz)')
     wave_speed: float = Property(doc='Speed of wave in the medium')
-    
-    def update(self,**kwargs):
-        # used to update class variables shown above
-        for key, value in kwargs.items():
-            self.key = value
+    window_size: int = Property(doc='Wndows size', default=750)
+
+    def __init__(self, path, *args, **kwargs):
+        if not isinstance(path, Path):
+            path = Path(path)
+        super().__init__(path, *args, **kwargs)
     
     @BufferedGenerator.generator_method
     def detections_gen(self):
-        detections = set()
-        current_time = datetime.now()
+        with self.path.open(newline='') as csv_file:
+            num_lines = sum(1 for line in csv_file)
+            csv_file.seek(0) # Reset file read position
 
-        if self.end_index == 0:
-            y = np.loadtxt(self.csv_path, delimiter=',', skiprows=self.start_index)
-        else:
-            y = np.loadtxt(self.csv_path, delimiter=',', skiprows=self.start_index,
-                           max_rows=int(self.end_index-self.start_index+1))
+            # Use a csv reader to read the file
+            reader = csv.reader(csv_file, delimiter=',')
 
-        L = len(y)
+            # Calculate the number of scans/timesteps
+            num_timesteps = int(num_lines/self.window_size)
+            for i in range(num_timesteps):
 
-        thetavals = np.linspace(0, 2*math.pi, num=400)
-        phivals = np.linspace(0, math.pi/2, num=100)
-        
-        # spatial locations of hydrophones
-        z = np.asarray(self.sensor_loc)
-        self.num_sensors = int(z.size/3)
+                # Grab the next `window_size` lines from the reader and read it into y (also convert to float)
+                y = np.array([row for row in islice(reader, self.window_size)]).astype(float)
 
-        N = self.num_sensors
+                # TODO: This may need to be changed to reflect the actual scan duration (e.g. 1 sec)
+                current_time = datetime.now()
 
-        # steering vector
-        v = np.zeros(N, dtype=np.complex)
+                L = len(y)
 
-        # directional unit vector
-        a = np.zeros(3)
+                thetavals = np.linspace(0, 2*np.pi, num=400)
+                phivals = np.linspace(0, np.pi/2, num=100)
 
-        scans = []
+                # spatial locations of hydrophones
+                z = np.asarray(self.sensor_loc[:, :, i])
+                self.num_sensors = int(z.size/3)
 
-        c = self.wave_speed/(2*self.omega*math.pi)
+                N = self.num_sensors
+                c = self.wave_speed/(2*self.omega*np.pi)
 
-        # calculate covariance estimate
-        R = np.matmul(np.transpose(y), y)
-        R_inv = np.linalg.inv(R)
+                # calculate covariance estimate
+                R = y.T @ y
+                R_inv = np.linalg.inv(R)
 
-        maxF = 0
-        maxtheta = 0
+                maxF = 0
+                maxtheta = 0
 
-        for theta in thetavals:
-            for phi in phivals:
-                # convert from spherical polar coordinates to cartesian
-                a[0] = math.cos(theta)*math.sin(phi)
-                a[1] = math.sin(theta)*math.sin(phi)
-                a[2] = math.cos(phi)
-                a = a/math.sqrt(np.sum(a*a))
-                for n in range(0, N):
-                    phase = np.sum(a*np.transpose(z[n, ]))/c
-                    v[n] = math.cos(phase) - math.sin(phase)*1j
-                F = 1/((L-N)*np.transpose(np.conj(v))@R_inv@v)
-                if F > maxF:
-                    maxF = F
-                    maxtheta = theta
-                    maxphi = phi
+                for theta in thetavals:
+                    for phi in phivals:
 
-        # Defining a detection
-        state_vector = StateVector([maxtheta, maxphi])  # [Azimuth, Elevation]
-        covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
-        measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
-                                           noise_covar=covar)
-        current_time = current_time + timedelta(milliseconds=1000*L/self.fs)
-        detection = Detection(state_vector, timestamp=current_time,
-                              measurement_model=measurement_model)
-        detections = set([detection])
+                        # NOTE: The next few lines are faster (10-fold), but equivalent to ...
 
-        yield current_time, detections
+                        # directional unit vector
+                        # convert from spherical polar coordinates to cartesian
+                        a = np.array([np.cos(theta) * np.sin(phi),
+                                      np.sin(theta) * np.sin(phi),
+                                      np.cos(phi)])
+                        a /= np.sqrt(np.sum(a ** 2))
+
+                        phases = np.sum(a * z, 1) / c
+
+                        # steering vector
+                        v = np.cos(phases) - np.sin(phases) * 1j
+
+                        # (NOTE cont'd) ... these:
+                        # # steering vector
+                        # v = np.zeros(N, dtype=np.complex)
+                        #
+                        # # directional unit vector
+                        # a = np.zeros(3)
+                        #
+                        # # convert from spherical polar coordinates to cartesian
+                        # a[0] = math.cos(theta) * math.sin(phi)
+                        # a[1] = math.sin(theta) * math.sin(phi)
+                        # a[2] = math.cos(phi)
+                        # a = a / math.sqrt(np.sum(a * a))
+                        # for n in range(0, N):
+                        #     phase = np.sum(a * np.transpose(z[n,])) / c
+                        #     v[n] = math.cos(phase) - math.sin(phase) * 1j
+
+                        F = 1 / ((L - N) * np.conj(v).T @ R_inv @ v)
+                        if F > maxF:
+                            maxF = F
+                            maxtheta = theta
+                            maxphi = phi
+
+                # Defining a detection
+                state_vector = StateVector([maxtheta, maxphi])  # [Azimuth, Elevation]
+                covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
+                measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
+                                                   noise_covar=covar)
+                current_time = current_time + timedelta(milliseconds=1000*L/self.fs)
+                detection = Detection(state_vector, timestamp=current_time,
+                                      measurement_model=measurement_model)
+
+                yield current_time, {detection}
 
 
 class RJMCMCBeamformer(Base, BufferedGenerator):
