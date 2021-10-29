@@ -150,10 +150,7 @@ class RJMCMCBeamformer(Base, BufferedGenerator):
     Networks, Neural Computation 13:2359–2407 (2001)
 
     """
-    csv_path: str = Property(doc='The path to the csv file, containing the raw data')
-    start_index: int = Property(default=0, doc='Index of first sample of specified time window')
-    end_index: int = Property(default=0, doc='Index of last sample of specified time window (set\
-                              to 0 to import all data up to the end of the file)')
+    path: str = Property(doc='The path to the csv file, containing the raw data')
     fs: float = Property(doc='Sampling frequency (Hz)')
     omega: float = Property(doc='Signal frequency (Hz)')
     sensor_loc: list = Property(doc='Cartesian coordinates of the sensors in the format\
@@ -162,213 +159,215 @@ class RJMCMCBeamformer(Base, BufferedGenerator):
     max_targets: int = Property(default=5, doc='Maximum number of targets')
     seed: int = Property(doc='Random number generator seed for reproducible output. Set to 0 for\
                          non-reproducible output')
+    window_size: int = Property(doc='Wndows size', default=750)
 
-    def update(self,**kwargs):
-        # used to update class variables shown above
-        for key, value in kwargs.items():
-            self.key = value
-
-    @BufferedGenerator.generator_method
-    def detections_gen(self):
-        detections = set()
-        current_time = datetime.now()
-
+    def __init__(self, path, *args, **kwargs):
+        if not isinstance(path, Path):
+            path = Path(path)
+        super().__init__(path, *args, **kwargs)
         if self.seed != 0:
             random.seed(a=self.seed, version=2)
 
-        num_samps = 10000  # number of MCMC samples
-        fs = self.fs  # sampling frequency (Hz)
-        Lambda = 1  # expected number of targets
+    @BufferedGenerator.generator_method
+    def detections_gen(self):
+        with self.path.open(newline='') as csv_file:
+            num_lines = sum(1 for line in csv_file)
+            csv_file.seek(0) # Reset file read position
 
-        if self.end_index == 0:
-            y = np.loadtxt(self.csv_path, delimiter=',', skiprows=self.start_index)
-        else:
-            y = np.loadtxt(self.csv_path, delimiter=',', skiprows=self.start_index,
-                           max_rows=int(self.end_index-self.start_index+1))
+            # Use a csv reader to read the file
+            reader = csv.reader(csv_file, delimiter=',')
 
-        L = len(y)
+            # Calculate the number of scans/timesteps
+            num_timesteps = int(num_lines/self.window_size) 
+            
+            num_samps = 10000  # number of MCMC samples
+            fs = self.fs  # sampling frequency (Hz)
+            Lambda = 1  # expected number of targets
+            nbins = 128
+            bin_steps = [math.pi/(2*nbins), 2*math.pi/nbins]
+            
+            for i in range(num_timesteps):
 
-        self.sensor_pos = np.asarray(self.sensor_loc)
-        self.num_sensors = int(self.sensor_pos.size/3)
+                # Grab the next `window_size` lines from the reader and read it into y (also convert to float)
+                y = np.array([row for row in islice(reader, self.window_size)]).astype(float)
+                current_time = datetime.now()
 
-        N = self.num_sensors*L
+                L = len(y)
 
-        nbins = 128
+                self.sensor_pos = np.asarray(np.asarray(self.sensor_loc[:, :, i]))
+                self.num_sensors = int(self.sensor_pos.size/3)
 
-        bin_steps = [math.pi/(2*nbins), 2*math.pi/nbins]
+                N = self.num_sensors*L
 
-        scans = []
+                # initialise histograms
+                param_hist = np.zeros([self.max_targets, nbins, nbins])
+                order_hist = np.zeros([self.max_targets])
 
-        # initialise histograms
-        param_hist = np.zeros([self.max_targets, nbins, nbins])
-        order_hist = np.zeros([self.max_targets])
+                # initialise params
+                p_params = np.empty([self.max_targets, 2])
+                noise = self.noise_proposal(0)
+                [params, K] = self.proposal([], 0, p_params)
 
-        # initialise params
-        p_params = np.empty([self.max_targets, 2])
-        noise = self.noise_proposal(0)
-        [params, K] = self.proposal([], 0, p_params)
+                # calculate sinTy and cosTy
+                sinTy = np.zeros([self.num_sensors])
+                cosTy = np.zeros([self.num_sensors])
 
-        # calculate sinTy and cosTy
-        sinTy = np.zeros([self.num_sensors])
-        cosTy = np.zeros([self.num_sensors])
+                yTy = 0
 
-        yTy = 0
+                for k in range(0, self.num_sensors):
+                    for t in range(0, L):
+                        sinTy[k] = sinTy[k] + math.sin(2*math.pi*t*self.omega/fs)*y[t, k]
+                        cosTy[k] = cosTy[k] + math.cos(2*math.pi*t*self.omega/fs)*y[t, k]
+                        yTy = yTy + y[t, k]*y[t, k]
 
-        for k in range(0, self.num_sensors):
-            for t in range(0, L):
-                sinTy[k] = sinTy[k] + math.sin(2*math.pi*t*self.omega/fs)*y[t, k]
-                cosTy[k] = cosTy[k] + math.cos(2*math.pi*t*self.omega/fs)*y[t, k]
-                yTy = yTy + y[t, k]*y[t, k]
+                sumsinsq = 0
+                sumcossq = 0
+                sumsincos = 0
 
-        sumsinsq = 0
-        sumcossq = 0
-        sumsincos = 0
+                for t in range(0, L):
+                    sumsinsq = sumsinsq \
+                        + math.sin(2*math.pi*t*self.omega/fs)*math.sin(2*math.pi*t*self.omega/fs)
+                    sumcossq = sumcossq \
+                        + math.cos(2*math.pi*t*self.omega/fs)*math.cos(2*math.pi*t*self.omega/fs)
+                    sumsincos = sumsincos \
+                        + math.sin(2*math.pi*t*self.omega/fs)*math.cos(2*math.pi*t*self.omega/fs)
+                sumsincos = 0
+                old_logp = self.log_prob(noise, params, K, y, L, sinTy, cosTy, yTy,
+                                         sumsinsq, sumcossq, sumsincos, N, Lambda)
+                n = 0
 
-        for t in range(0, L):
-            sumsinsq = sumsinsq \
-                + math.sin(2*math.pi*t*self.omega/fs)*math.sin(2*math.pi*t*self.omega/fs)
-            sumcossq = sumcossq \
-                + math.cos(2*math.pi*t*self.omega/fs)*math.cos(2*math.pi*t*self.omega/fs)
-            sumsincos = sumsincos \
-                + math.sin(2*math.pi*t*self.omega/fs)*math.cos(2*math.pi*t*self.omega/fs)
-        sumsincos = 0
-        old_logp = self.log_prob(noise, params, K, y, L, sinTy, cosTy, yTy,
-                                 sumsinsq, sumcossq, sumsincos, N, Lambda)
-        n = 0
+                while n < num_samps:
+                    p_noise = self.noise_proposal(noise)
+                    [p_params, p_K, Qratio] = self.proposal_func(params, K, p_params, self.max_targets)
+                    if p_K != 0:
+                        new_logp = self.log_prob(p_noise, p_params, p_K, y, L, sinTy,
+                                                 cosTy, yTy, sumsinsq, sumcossq, sumsincos, N, Lambda)
+                        logA = new_logp - old_logp + np.log(Qratio)
 
-        while n < num_samps:
-            p_noise = self.noise_proposal(noise)
-            [p_params, p_K, Qratio] = self.proposal_func(params, K, p_params, self.max_targets)
-            if p_K != 0:
-                new_logp = self.log_prob(p_noise, p_params, p_K, y, L, sinTy,
-                                         cosTy, yTy, sumsinsq, sumcossq, sumsincos, N, Lambda)
-                logA = new_logp - old_logp + np.log(Qratio)
+                        # do a Metropolis-Hastings step
+                        if logA > np.log(random.uniform(0, 1)):
+                            old_logp = new_logp
+                            params = copy.deepcopy(p_params)
+                            K = copy.deepcopy(p_K)
+                            for k in range(0, K):
+                                # correct for mirrored DOAs in elevation
+                                if ((params[k, 0] > math.pi/2) & (params[k, 0] <= math.pi)):
+                                    params[k, 0] = math.pi - params[k, 0]
+                                elif ((params[k, 0] > math.pi) & (params[k, 0] <= 3*math.pi/2)):
+                                    params[k, 0] = params[k, 0] - math.pi
+                                    params[k, 1] = params[k, 1] - math.pi
+                                elif ((params[k, 0] > 3*math.pi/2) & (params[k, 0] <= 2*math.pi)):
+                                    params[k, 0] = 2*math.pi - params[k, 0]
+                                    params[k, 1] = params[k, 1] - math.pi
+                                if (params[k, 1] < 0):
+                                    params[k, 1] += 2*math.pi
+                                elif (params[k, 1] > 2*math.pi):
+                                    params[k, 1] -= 2*math.pi
+                        for k in range(0, K):
+                            bin_ind = [0, 0]
+                            for ind in range(0, 2):
+                                edge = bin_steps[ind]
+                                while edge < params[k, ind]:
+                                    edge += bin_steps[ind]
+                                    bin_ind[ind] += 1
+                                    if bin_ind[ind] == nbins-1:
+                                        break
+                            param_hist[K-1, bin_ind[0], bin_ind[1]] += 1
+                            order_hist[K-1] += 1
+                        n += 1
 
-                # do a Metropolis-Hastings step
-                if logA > np.log(random.uniform(0, 1)):
-                    old_logp = new_logp
-                    params = copy.deepcopy(p_params)
-                    K = copy.deepcopy(p_K)
-                    for k in range(0, K):
-                        # correct for mirrored DOAs in elevation
-                        if ((params[k, 0] > math.pi/2) & (params[k, 0] <= math.pi)):
-                            params[k, 0] = math.pi - params[k, 0]
-                        elif ((params[k, 0] > math.pi) & (params[k, 0] <= 3*math.pi/2)):
-                            params[k, 0] = params[k, 0] - math.pi
-                            params[k, 1] = params[k, 1] - math.pi
-                        elif ((params[k, 0] > 3*math.pi/2) & (params[k, 0] <= 2*math.pi)):
-                            params[k, 0] = 2*math.pi - params[k, 0]
-                            params[k, 1] = params[k, 1] - math.pi
-                        if (params[k, 1] < 0):
-                            params[k, 1] += 2*math.pi
-                        elif (params[k, 1] > 2*math.pi):
-                            params[k, 1] -= 2*math.pi
-                for k in range(0, K):
-                    bin_ind = [0, 0]
-                    for ind in range(0, 2):
-                        edge = bin_steps[ind]
-                        while edge < params[k, ind]:
-                            edge += bin_steps[ind]
-                            bin_ind[ind] += 1
-                            if bin_ind[ind] == nbins-1:
-                                break
-                    param_hist[K-1, bin_ind[0], bin_ind[1]] += 1
-                    order_hist[K-1] += 1
-                n += 1
+                # look for peaks in histograms
+                max_peak = 0
+                max_ind = 0
+                for ind in range(0, self.max_targets):
+                    if order_hist[ind] > max_peak:
+                        max_peak = order_hist[ind]
+                        max_ind = ind
 
-        # look for peaks in histograms
-        max_peak = 0
-        max_ind = 0
-        for ind in range(0, self.max_targets):
-            if order_hist[ind] > max_peak:
-                max_peak = order_hist[ind]
-                max_ind = ind
+                # look for largest N peaks, where N corresponds to peak in the order histogram
+                # use divide-and-conquer quadrant-based approach
+                if max_ind == 0:
+                    # only one target
+                    [unique_peak_inds1, unique_peak_inds2] = np.unravel_index(
+                                                             param_hist[0, :, :].argmax(),
+                                                             param_hist[0, :, :].shape)
+                    num_peaks = 1
+                else:
+                    # multiple targets
+                    order_ind = max_ind - 1
+                    quadrant_factor = 2
+                    nstart = 0
+                    mstart = 0
+                    nend = quadrant_factor
+                    mend = quadrant_factor
+                    peak_inds1 = [None] * 16
+                    peak_inds2 = [None] * 16
+                    k = 0
+                    while quadrant_factor < 32:
+                        max_quadrant = 0
+                        quadrant_size = nbins/quadrant_factor
+                        for n in range(nstart, nend):
+                            for m in range(mstart, mend):
+                                [ind1, ind2] = np.unravel_index(
+                                               param_hist[order_ind,
+                                                          int(n*quadrant_size):
+                                                          int((n+1)*quadrant_size-1),
+                                                          int(m*quadrant_size):
+                                                          int((m+1)*quadrant_size-1)].argmax(),
+                                               param_hist[order_ind, int(n*quadrant_size):
+                                                          int((n+1)*quadrant_size-1),
+                                                          int(m*quadrant_size):
+                                                          int((m+1)*quadrant_size-1)].shape)
+                                peak_inds1[k] = int(ind1 + n*quadrant_size)
+                                peak_inds2[k] = int(ind2 + m*quadrant_size)
+                                if param_hist[order_ind, peak_inds1[k], peak_inds2[k]] > max_quadrant:
+                                    max_quadrant = param_hist[order_ind, peak_inds1[k], peak_inds2[k]]
+                                    max_ind1 = n
+                                    max_ind2 = m
+                                k += 1
+                        quadrant_factor = 2*quadrant_factor
+                        # on next loop look for other peaks in the quadrant containing the highest peak
+                        nstart = 2*max_ind1
+                        mstart = 2*max_ind2
+                        nend = 2*(max_ind1+1)
+                        mend = 2*(max_ind2+1)
 
-        # look for largest N peaks, where N corresponds to peak in the order histogram
-        # use divide-and-conquer quadrant-based approach
-        if max_ind == 0:
-            # only one target
-            [unique_peak_inds1, unique_peak_inds2] = np.unravel_index(
-                                                     param_hist[0, :, :].argmax(),
-                                                     param_hist[0, :, :].shape)
-            num_peaks = 1
-        else:
-            # multiple targets
-            order_ind = max_ind - 1
-            quadrant_factor = 2
-            nstart = 0
-            mstart = 0
-            nend = quadrant_factor
-            mend = quadrant_factor
-            peak_inds1 = [None] * 16
-            peak_inds2 = [None] * 16
-            k = 0
-            while quadrant_factor < 32:
-                max_quadrant = 0
-                quadrant_size = nbins/quadrant_factor
-                for n in range(nstart, nend):
-                    for m in range(mstart, mend):
-                        [ind1, ind2] = np.unravel_index(
-                                       param_hist[order_ind,
-                                                  int(n*quadrant_size):
-                                                  int((n+1)*quadrant_size-1),
-                                                  int(m*quadrant_size):
-                                                  int((m+1)*quadrant_size-1)].argmax(),
-                                       param_hist[order_ind, int(n*quadrant_size):
-                                                  int((n+1)*quadrant_size-1),
-                                                  int(m*quadrant_size):
-                                                  int((m+1)*quadrant_size-1)].shape)
-                        peak_inds1[k] = int(ind1 + n*quadrant_size)
-                        peak_inds2[k] = int(ind2 + m*quadrant_size)
-                        if param_hist[order_ind, peak_inds1[k], peak_inds2[k]] > max_quadrant:
-                            max_quadrant = param_hist[order_ind, peak_inds1[k], peak_inds2[k]]
-                            max_ind1 = n
-                            max_ind2 = m
-                        k += 1
-                quadrant_factor = 2*quadrant_factor
-                # on next loop look for other peaks in the quadrant containing the highest peak
-                nstart = 2*max_ind1
-                mstart = 2*max_ind2
-                nend = 2*(max_ind1+1)
-                mend = 2*(max_ind2+1)
+                    # determine unique peaks
+                    unique_peak_inds1 = [None] * 16
+                    unique_peak_inds2 = [None] * 16
+                    unique_peak_inds1[0] = peak_inds1[0]
+                    unique_peak_inds2[0] = peak_inds2[0]
+                    num_peaks = 1
+                    for n in range(0, 16):
+                        flag_unique = 1
+                        for k in range(0, num_peaks):
+                            # check if peak is close to any other known peaks
+                            if (unique_peak_inds1[k] - peak_inds1[n]) < 2:
+                                if (unique_peak_inds2[k] - peak_inds2[n]) < 2:
+                                    # part of same peak (check if bin is taller)
+                                    if (param_hist[order_ind, peak_inds1[n], peak_inds2[n]]
+                                       > param_hist[order_ind, unique_peak_inds1[k],
+                                                    unique_peak_inds2[k]]):
+                                        unique_peak_inds1 = peak_inds1[n]
+                                        unique_peak_inds2 = peak_inds2[n]
+                                    flag_unique = 0
+                                    break
+                        if flag_unique == 1:
+                            unique_peak_inds1[num_peaks] = peak_inds1[n]
+                            unique_peak_inds2[num_peaks] = peak_inds2[n]
+                            num_peaks += 1
 
-            # determine unique peaks
-            unique_peak_inds1 = [None] * 16
-            unique_peak_inds2 = [None] * 16
-            unique_peak_inds1[0] = peak_inds1[0]
-            unique_peak_inds2[0] = peak_inds2[0]
-            num_peaks = 1
-            for n in range(0, 16):
-                flag_unique = 1
-                for k in range(0, num_peaks):
-                    # check if peak is close to any other known peaks
-                    if (unique_peak_inds1[k] - peak_inds1[n]) < 2:
-                        if (unique_peak_inds2[k] - peak_inds2[n]) < 2:
-                            # part of same peak (check if bin is taller)
-                            if (param_hist[order_ind, peak_inds1[n], peak_inds2[n]]
-                               > param_hist[order_ind, unique_peak_inds1[k],
-                                            unique_peak_inds2[k]]):
-                                unique_peak_inds1 = peak_inds1[n]
-                                unique_peak_inds2 = peak_inds2[n]
-                            flag_unique = 0
-                            break
-                if flag_unique == 1:
-                    unique_peak_inds1[num_peaks] = peak_inds1[n]
-                    unique_peak_inds2[num_peaks] = peak_inds2[n]
-                    num_peaks += 1
+                # Defining a detection
+                state_vector = StateVector([unique_peak_inds2*bin_steps[1],
+                                            unique_peak_inds1*bin_steps[0]])  # [Azimuth, Elevation]
+                covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
+                measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
+                                                   noise_covar=covar)
+                current_time = current_time + timedelta(milliseconds=1000*L/self.fs)
+                detection = Detection(state_vector, timestamp=current_time,
+                                      measurement_model=measurement_model)
 
-        # Defining a detection
-        state_vector = StateVector([unique_peak_inds2*bin_steps[1],
-                                    unique_peak_inds1*bin_steps[0]])  # [Azimuth, Elevation]
-        covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
-        measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
-                                           noise_covar=covar)
-        current_time = current_time + timedelta(milliseconds=1000*L/self.fs)
-        detection = Detection(state_vector, timestamp=current_time,
-                              measurement_model=measurement_model)
-        detections = set([detection])
-
-        yield current_time, detections
+                yield current_time, {detection}
 
     def log_prob(self, p_noise, p_params, p_K, y, T, sinTy, cosTy, yTy, sumsinsq, sumcossq,
                  sumsincos, N, Lambda):
