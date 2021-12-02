@@ -15,11 +15,13 @@ import csv
 import copy
 import math
 from scipy.stats import norm, uniform
+from scipy.interpolate import interp1d
 from itertools import islice
 from pathlib import Path
 from datetime import datetime, timedelta
 import numpy as np
 from typing import Sequence
+import numba 
 from ..base import Property
 from ..buffered_generator import BufferedGenerator
 from ..models.measurement.linear import LinearGaussian
@@ -27,6 +29,30 @@ from ..types.array import StateVector, CovarianceMatrix
 from ..types.detection import Detection
 from ..types.angle import Elevation, Bearing
 from ..reader import DetectionReader
+
+
+# putting numba functions here has they don't seem to work as class functions
+@numba.njit
+def calc_time_delays_core(num_sensors, fs, wave_speed, L_pulse, a, z):
+    time_delays = np.zeros((num_sensors),dtype=numba.int64)
+    arr = L_pulse + fs*np.sum(a * z, 1) / wave_speed
+    for i in range(0, num_sensors):
+        time_delays[i] = np.round(arr[i])
+    return(time_delays)
+    
+@numba.njit
+def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nbins):
+    DoA_grid = np.zeros((nbins[0], nbins[1]))
+    for theta_ind in range(0, nbins[0]):
+        for phi_ind in range(0, nbins[1]):
+            #pick out relevant pre-computed values
+            time_delays = precomp_time_delays[:, theta_ind,phi_ind] + r
+            # calculate sum of the spectral amplitudes from each hydrophone for given DoA
+            spectral_amplitude = 0
+            for n in range(0, num_sensors):
+                spectral_amplitude = spectral_amplitude + conv[time_delays[n], n]
+            DoA_grid[theta_ind, phi_ind] = spectral_amplitude
+    return(DoA_grid)
 
 
 class CaponBeamformer(DetectionReader):
@@ -558,3 +584,144 @@ class RJMCMCBeamformer(DetectionReader):
                         p_params[0:-1] = params[1:]
                     p_K = K - 1
         return p_params, p_K, Qratio
+
+
+class ActiveBeamformer(DetectionReader):
+    """Conventional active beamformer
+
+    """
+    sensor_path: Path = Property(doc='The path to the csv file containing the raw sensor data')
+    pulse_path: Path = Property(doc='The path to the csv file containing the pulse data')
+    fs: float = Property(doc='Sampling frequency (Hz)')
+    sensor_loc: Sequence[StateVector] = Property(doc='Cartesian coordinates of the sensors in the\
+                                                 format "X1 Y1 Z1; X2 Y2 Z2;...."')
+    wave_speed: float = Property(doc='Speed of wave in the medium')
+    max_vel: float = Property(doc='Maximum velocity of targets')
+    window_size: int = Property(doc='Window size', default=750)
+    start_time: datetime = Property(doc='Time first sample was recorded', default=datetime.now())
+    nbins: Sequence[int] = Property(default=128, doc='Number of bins used in beamformer output for\
+                           [azimuth, elevation, range, Doppler]')
+
+    def __init__(self, sensor_path, pulse_path, *args, **kwargs):
+        if not isinstance(sensor_path, Path):
+            sensor_path = Path(sensor_path)
+        if not isinstance(pulse_path, Path):
+            pulse_path = Path(pulse_path)
+        super().__init__(sensor_path, pulse_path, *args, **kwargs)
+        self.preprocess_pulse()
+
+    def preprocess_pulse(self):
+        # Compute FFT of pulse (assumed to be constant)
+        pulse = np.loadtxt(self.pulse_path, delimiter=',')
+        self.L_pulse = len(pulse)
+        self.L_total = self.window_size + self.L_pulse
+        self.L_fft = int(np.ceil(self.L_total/2))
+        # Pre-compute simulated Doppler-shifted pulses
+        target_velocity = np.linspace(-100, 100, num=self.nbins[3], dtype=float)
+        time_axis = np.linspace(0, self.L_pulse - 1, num=self.L_pulse)
+        spline_fit = interp1d(time_axis, pulse, kind='cubic')
+        self.F_pulse = np.zeros([self.L_fft, self.nbins[3]], dtype=complex)
+        for n in range(0,self.nbins[3]):
+            Doppler_scale = self.wave_speed/(self.wave_speed+target_velocity[n])
+            scaled_time_axis = np.linspace(0, self.L_pulse - 1, int(Doppler_scale*self.L_pulse))
+            self.F_pulse[:,n] = np.fft.rfft(spline_fit(scaled_time_axis), self.L_total, 0)
+        # Read in first set of sensor positions to get the number of sensors
+        raw_data = np.asarray(self.sensor_loc[0])
+        self.num_sensors = int(raw_data.size/ 3)
+
+    #SM: can't quite see how to get this to work with numba, but it's now outside the loops, so never mind
+    #@numba.njit
+    def calcprecomp_time_delays(self, thetavals, phivals, z):
+        precomp_time_delays = np.zeros((self.num_sensors, self.nbins[0], self.nbins[1]),dtype = int) #numba.int64)
+        for theta_ind in range(0, self.nbins[0]):
+            theta = thetavals[theta_ind]
+            for phi_ind in range(0, self.nbins[1]):
+                phi = phivals[phi_ind]
+                # directional unit vector
+                # convert from spherical polar coordinates to cartesian
+                a = np.array([np.cos(theta) * np.sin(phi),
+                              np.sin(theta) * np.sin(phi),
+                              np.cos(phi)],dtype=float) #numba.float64)
+                tmp = calc_time_delays_core(self.num_sensors, self.fs, self.wave_speed, self.L_pulse, a, z)
+                for i in range(0, self.num_sensors):
+                    precomp_time_delays[i,theta_ind,phi_ind] = tmp[i] #SM: must be a nicer way to do this
+        return(precomp_time_delays)
+
+    @BufferedGenerator.generator_method
+    def detections_gen(self):
+        with self.sensor_path.open(newline='') as csv_file:
+            num_lines = sum(1 for line in csv_file)
+            csv_file.seek(0)  # Reset file read position
+
+            # Use a csv reader to read the file
+            reader = csv.reader(csv_file, delimiter=',')
+
+            current_time = self.start_time
+
+            # Calculate the number of scans/timesteps
+            num_timesteps = int(num_lines/self.window_size)
+            
+            # assign memory to arrays used in the loops
+            F_pulse_shifted = np.zeros([self.L_fft, self.num_sensors], dtype=complex)
+            
+            thetavals = np.linspace(-math.pi, math.pi, num=self.nbins[0])
+            phivals = np.linspace(-math.pi/2, math.pi/2, num=self.nbins[1])
+            rangevals = np.linspace(int(self.window_size/(self.nbins[2]+1)), int(self.window_size - self.window_size/(self.nbins[2]+1)), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
+            Dopplervals = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=int) #SM: should be float but doppler is also used as an index offset 
+            
+            # PLACEHOLDER #
+            amp_max = 0
+            theta_max = 0
+            phi_max = 0
+            range_max = 0
+            Doppler_max = 0
+            # PLACEHOLDER #
+            
+            for i in range(num_timesteps):
+
+                # Grab the next `window_size` lines from the reader and read it into y (also
+                # convert to float)
+                y = np.array([row for row in islice(reader, self.window_size)]).astype(float)
+
+                # spatial locations of hydrophones
+                raw_data = np.asarray(self.sensor_loc)
+                z = np.reshape(raw_data, [self.num_sensors, 3])
+                
+                # pre-compute time-offsets
+                precomp_time_delays = self.calcprecomp_time_delays(thetavals, phivals, z)
+
+                # calculate FFT of each time series and pulse for re-use in convolutions within loop
+                # use length L+L_pulse to prevent edge effects
+                F_sig = np.fft.rfft(y, self.L_total, 0)
+
+                # shift the components in the frequency domain to simulate different Doppler shifts
+                for n_D in range(0, self.nbins[3]):
+                    for n in range(0, self.num_sensors):
+                        F_pulse_shifted[:, n] = self.F_pulse[:, n_D]
+                    # calculate convolution with signals for current Doppler shift
+                    conv = np.fft.irfft(F_pulse_shifted * F_sig, self.L_total, 0)
+
+                    for r in rangevals:
+                        DoA_grid = inner_loop(self.num_sensors, thetavals, phivals, conv, precomp_time_delays, r, self.nbins)
+                        
+                        # PLACEHOLDER - very simple peak-finder to be replaced by CFAR detector #
+                        maxind = np.unravel_index(DoA_grid.argmax(), DoA_grid.shape)
+                        max_val = DoA_grid[maxind[0], maxind[1]]
+                        if max_val > amp_max:
+                            amp_max = max_val
+                            theta_max = thetavals[maxind[0]]
+                            phi_max = phivals[maxind[1]]
+                            range_max = r
+                            Doppler_max = Dopplervals[n_D]
+                        # PLACEHOLDER #
+
+                # Defining a detection
+                state_vector = StateVector([theta_max, phi_max])
+                covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
+                measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
+                                                   noise_covar=covar)
+                current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
+                detection = Detection(state_vector, timestamp=current_time,
+                                      measurement_model=measurement_model)
+
+                yield current_time, {detection}
