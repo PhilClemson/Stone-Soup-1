@@ -30,8 +30,6 @@ from ..types.detection import Detection
 from ..types.angle import Elevation, Bearing
 from ..reader import DetectionReader
 
-import timeit
-
 
 # putting numba functions here has they don't seem to work as class functions
 @numba.njit
@@ -654,7 +652,7 @@ class ActiveBeamformer(DetectionReader):
         return(precomp_time_delays)
         
     def thresh(self, arr, thresh, current_time):
-        detections = []
+        detections = set()
         covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
         measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                            noise_covar=covar)
@@ -667,17 +665,13 @@ class ActiveBeamformer(DetectionReader):
                             state_vector = StateVector([self.thetavals[outer1], self.phivals[outer2]])
                             detection = Detection(state_vector, timestamp=current_time,
                                                   measurement_model=measurement_model)
-                            detections.append(detection)
+                            detections.add(detection)
         return detections
 
     def cfar4d(self, arr):
         outputs = np.empty(arr.shape)
         #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
-        end = timeit.default_timer()
         for outer1 in range(1,self.nbins[0]-1):
-            start = timeit.default_timer()
-            print('outer1 loop: ',start-end)
-            end = start
             for outer2 in range(1,self.nbins[1]-1):
                 for outer3 in range(1,self.nbins[2]-1):
                     for outer4 in range(1,self.nbins[3]-1):
@@ -766,6 +760,6 @@ class ActiveBeamformer(DetectionReader):
 
                 # use CFAR algorithm to define detections
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                detections = self.thresh(self.cfar4d(output),3)
+                detections = self.thresh(self.cfar4d(output), 3, current_time)
 
                 yield current_time, detections
