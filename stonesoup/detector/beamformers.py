@@ -30,6 +30,8 @@ from ..types.detection import Detection
 from ..types.angle import Elevation, Bearing
 from ..reader import DetectionReader
 
+import timeit
+
 
 # putting numba functions here has they don't seem to work as class functions
 @numba.njit
@@ -609,6 +611,10 @@ class ActiveBeamformer(DetectionReader):
             pulse_path = Path(pulse_path)
         super().__init__(sensor_path, pulse_path, *args, **kwargs)
         self.preprocess_pulse()
+        self.thetavals = np.linspace(-math.pi, math.pi, num=self.nbins[0])
+        self.phivals = np.linspace(-math.pi/2, math.pi/2, num=self.nbins[1])
+        self.rangevals = np.linspace(int(self.window_size/(self.nbins[2]+1)), int(self.window_size - self.window_size/(self.nbins[2]+1)), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
+        self.Dopplervals = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=int) #SM: should be float but doppler is also used as an index offset 
 
     def preprocess_pulse(self):
         # Compute FFT of pulse (assumed to be constant)
@@ -631,12 +637,12 @@ class ActiveBeamformer(DetectionReader):
 
     #SM: can't quite see how to get this to work with numba, but it's now outside the loops, so never mind
     #@numba.njit
-    def calcprecomp_time_delays(self, thetavals, phivals, z):
+    def calcprecomp_time_delays(self, z):
         precomp_time_delays = np.zeros((self.num_sensors, self.nbins[0], self.nbins[1]),dtype = int) #numba.int64)
         for theta_ind in range(0, self.nbins[0]):
-            theta = thetavals[theta_ind]
+            theta = self.thetavals[theta_ind]
             for phi_ind in range(0, self.nbins[1]):
-                phi = phivals[phi_ind]
+                phi = self.phivals[phi_ind]
                 # directional unit vector
                 # convert from spherical polar coordinates to cartesian
                 a = np.array([np.cos(theta) * np.sin(phi),
@@ -646,6 +652,53 @@ class ActiveBeamformer(DetectionReader):
                 for i in range(0, self.num_sensors):
                     precomp_time_delays[i,theta_ind,phi_ind] = tmp[i] #SM: must be a nicer way to do this
         return(precomp_time_delays)
+        
+    def thresh(self, arr, thresh, current_time):
+        detections = []
+        covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
+        measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
+                                           noise_covar=covar)
+        for outer1 in range(1,self.nbins[0]):
+            for outer2 in range(1,self.nbins[1]):
+                for outer3 in range(1,self.nbins[2]):
+                    for outer4 in range(1,self.nbins[3]):
+                        if(arr[outer1,outer2,outer3,outer4]>thresh):
+                            # define a detection and add it to list
+                            state_vector = StateVector([self.thetavals[outer1], self.phivals[outer2]])
+                            detection = Detection(state_vector, timestamp=current_time,
+                                                  measurement_model=measurement_model)
+                            detections.append(detection)
+        return detections
+
+    def cfar4d(self, arr):
+        outputs = np.empty(arr.shape)
+        #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
+        end = timeit.default_timer()
+        for outer1 in range(1,self.nbins[0]-1):
+            start = timeit.default_timer()
+            print('outer1 loop: ',start-end)
+            end = start
+            for outer2 in range(1,self.nbins[1]-1):
+                for outer3 in range(1,self.nbins[2]-1):
+                    for outer4 in range(1,self.nbins[3]-1):
+                        mn = 0
+                        mnsq = 0
+                        #should use cumulative sums to mitigate computational cost if the ranges are larger
+                        for inner1 in range(-1,1):
+                            for inner2 in range(-1,1):
+                                for inner3 in range(-1,1):
+                                    for inner4 in range(-1,1):
+                                      val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
+                                      mn += val
+                                      mnsq += val*val
+                        val = arr[outer1,outer2,outer3,outer4]
+                        mn -= val
+                        mnsq -= val*val
+                        #mn and mnsq now are respectively the sum and sum of squares of the cells 
+                        #around the one in the middle
+                        vn = mnsq-mn*mn #variance
+                        outputs[outer1,outer2,outer3,outer4] = mn*mn/vn #number of standard deviations squared
+        return outputs
 
     @BufferedGenerator.generator_method
     def detections_gen(self):
@@ -662,19 +715,15 @@ class ActiveBeamformer(DetectionReader):
             num_timesteps = int(num_lines/self.window_size)
             
             # assign memory to arrays used in the loops
-            F_pulse_shifted = np.zeros([self.L_fft, self.num_sensors], dtype=complex)
-            
-            thetavals = np.linspace(-math.pi, math.pi, num=self.nbins[0])
-            phivals = np.linspace(-math.pi/2, math.pi/2, num=self.nbins[1])
-            rangevals = np.linspace(int(self.window_size/(self.nbins[2]+1)), int(self.window_size - self.window_size/(self.nbins[2]+1)), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
-            Dopplervals = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=int) #SM: should be float but doppler is also used as an index offset 
+            F_pulse_shifted = np.empty([self.L_fft, self.num_sensors], dtype=complex)
+            output = np.empty([self.nbins[0], self.nbins[1], self.nbins[2], self.nbins[3]])
             
             # PLACEHOLDER #
-            amp_max = 0
-            theta_max = 0
-            phi_max = 0
-            range_max = 0
-            Doppler_max = 0
+            # amp_max = 0
+            # theta_max = 0
+            # phi_max = 0
+            # range_max = 0
+            # Doppler_max = 0
             # PLACEHOLDER #
             
             for i in range(num_timesteps):
@@ -688,7 +737,7 @@ class ActiveBeamformer(DetectionReader):
                 z = np.reshape(raw_data, [self.num_sensors, 3])
                 
                 # pre-compute time-offsets
-                precomp_time_delays = self.calcprecomp_time_delays(thetavals, phivals, z)
+                precomp_time_delays = self.calcprecomp_time_delays(z)
 
                 # calculate FFT of each time series and pulse for re-use in convolutions within loop
                 # use length L+L_pulse to prevent edge effects
@@ -701,27 +750,22 @@ class ActiveBeamformer(DetectionReader):
                     # calculate convolution with signals for current Doppler shift
                     conv = np.fft.irfft(F_pulse_shifted * F_sig, self.L_total, 0)
 
-                    for r in rangevals:
-                        DoA_grid = inner_loop(self.num_sensors, thetavals, phivals, conv, precomp_time_delays, r, self.nbins)
+                    for n_r in range(0, self.nbins[2]):
+                        output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], self.nbins)
                         
                         # PLACEHOLDER - very simple peak-finder to be replaced by CFAR detector #
-                        maxind = np.unravel_index(DoA_grid.argmax(), DoA_grid.shape)
-                        max_val = DoA_grid[maxind[0], maxind[1]]
-                        if max_val > amp_max:
-                            amp_max = max_val
-                            theta_max = thetavals[maxind[0]]
-                            phi_max = phivals[maxind[1]]
-                            range_max = r
-                            Doppler_max = Dopplervals[n_D]
+                        # maxind = np.unravel_index(DoA_grid.argmax(), DoA_grid.shape)
+                        # max_val = DoA_grid[maxind[0], maxind[1]]
+                        # if max_val > amp_max:
+                            # amp_max = max_val
+                            # theta_max = self.thetavals[maxind[0]]
+                            # phi_max = self.phivals[maxind[1]]
+                            # range_max = r
+                            # Doppler_max = Dopplervals[n_D]
                         # PLACEHOLDER #
 
-                # Defining a detection
-                state_vector = StateVector([theta_max, phi_max])
-                covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
-                measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
-                                                   noise_covar=covar)
+                # use CFAR algorithm to define detections
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                detection = Detection(state_vector, timestamp=current_time,
-                                      measurement_model=measurement_model)
+                detections = self.thresh(self.cfar4d(output),3)
 
-                yield current_time, {detection}
+                yield current_time, detections
