@@ -54,6 +54,45 @@ def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nb
             DoA_grid[theta_ind, phi_ind] = spectral_amplitude
     return(DoA_grid)
 
+@numba.njit
+def thresh(nbins, thetavals, phivals, arr, thresh):
+    detections = []
+    for outer1 in range(1,nbins[0]):
+        for outer2 in range(1,nbins[1]):
+            for outer3 in range(1,nbins[2]):
+                for outer4 in range(1,nbins[3]):
+                    if(arr[outer1,outer2,outer3,outer4]>thresh):
+                        # define a detection and add it to list
+                        detections.append([thetavals[outer1], phivals[outer2]])
+    return detections
+
+@numba.njit
+def cfar4d(nbins, arr):
+    outputs = np.empty(arr.shape)
+    #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
+    for outer1 in range(1,nbins[0]-1):
+        for outer2 in range(1,nbins[1]-1):
+            for outer3 in range(1,nbins[2]-1):
+                for outer4 in range(1,nbins[3]-1):
+                    mn = 0
+                    mnsq = 0
+                    #should use cumulative sums to mitigate computational cost if the ranges are larger
+                    for inner1 in range(-1,1):
+                        for inner2 in range(-1,1):
+                            for inner3 in range(-1,1):
+                                for inner4 in range(-1,1):
+                                  val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
+                                  mn += val
+                                  mnsq += val*val
+                    val = arr[outer1,outer2,outer3,outer4]
+                    mn -= val
+                    mnsq -= val*val
+                    #mn and mnsq now are respectively the sum and sum of squares of the cells 
+                    #around the one in the middle
+                    vn = mnsq-mn*mn #variance
+                    outputs[outer1,outer2,outer3,outer4] = mn*mn/vn #number of standard deviations squared
+    return outputs
+
 
 class CaponBeamformer(DetectionReader):
     """An adaptive beamformer method designed to reduce the influence of side lobes in the case of
@@ -650,49 +689,6 @@ class ActiveBeamformer(DetectionReader):
                 for i in range(0, self.num_sensors):
                     precomp_time_delays[i,theta_ind,phi_ind] = tmp[i] #SM: must be a nicer way to do this
         return(precomp_time_delays)
-        
-    def thresh(self, arr, thresh, current_time):
-        detections = set()
-        covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
-        measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
-                                           noise_covar=covar)
-        for outer1 in range(1,self.nbins[0]):
-            for outer2 in range(1,self.nbins[1]):
-                for outer3 in range(1,self.nbins[2]):
-                    for outer4 in range(1,self.nbins[3]):
-                        if(arr[outer1,outer2,outer3,outer4]>thresh):
-                            # define a detection and add it to list
-                            state_vector = StateVector([self.thetavals[outer1], self.phivals[outer2]])
-                            detection = Detection(state_vector, timestamp=current_time,
-                                                  measurement_model=measurement_model)
-                            detections.add(detection)
-        return detections
-
-    def cfar4d(self, arr):
-        outputs = np.empty(arr.shape)
-        #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
-        for outer1 in range(1,self.nbins[0]-1):
-            for outer2 in range(1,self.nbins[1]-1):
-                for outer3 in range(1,self.nbins[2]-1):
-                    for outer4 in range(1,self.nbins[3]-1):
-                        mn = 0
-                        mnsq = 0
-                        #should use cumulative sums to mitigate computational cost if the ranges are larger
-                        for inner1 in range(-1,1):
-                            for inner2 in range(-1,1):
-                                for inner3 in range(-1,1):
-                                    for inner4 in range(-1,1):
-                                      val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
-                                      mn += val
-                                      mnsq += val*val
-                        val = arr[outer1,outer2,outer3,outer4]
-                        mn -= val
-                        mnsq -= val*val
-                        #mn and mnsq now are respectively the sum and sum of squares of the cells 
-                        #around the one in the middle
-                        vn = mnsq-mn*mn #variance
-                        outputs[outer1,outer2,outer3,outer4] = mn*mn/vn #number of standard deviations squared
-        return outputs
 
     @BufferedGenerator.generator_method
     def detections_gen(self):
@@ -759,7 +755,16 @@ class ActiveBeamformer(DetectionReader):
                         # PLACEHOLDER #
 
                 # use CFAR algorithm to define detections
+                covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
+                measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
+                                                   noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                detections = self.thresh(self.cfar4d(output), 3, current_time)
+                dets = thresh(self.nbins, self.thetavals, self.phivals, cfar4d(self.nbins, output), 1000000)
+                detections = set()
+                for det in dets:
+                    state_vector = StateVector(det)
+                    detection = Detection(state_vector, timestamp=current_time,
+                                          measurement_model=measurement_model)
+                    detections.add(detection)
 
                 yield current_time, detections
