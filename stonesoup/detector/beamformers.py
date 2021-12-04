@@ -77,16 +77,16 @@ def cfar4d(nbins, arr):
                     mn = 0
                     mnsq = 0
                     #should use cumulative sums to mitigate computational cost if the ranges are larger
-                    for inner1 in range(-1,1):
-                        for inner2 in range(-1,1):
-                            for inner3 in range(-1,1):
-                                for inner4 in range(-1,1):
+                    for inner1 in range(-1,2):
+                        for inner2 in range(-1,2):
+                            for inner3 in range(-1,2):
+                                for inner4 in range(-1,2):
                                   val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
-                                  mn += val
-                                  mnsq += val*val
+                                  mn += val/80.0
+                                  mnsq += val*val/80.0
                     val = arr[outer1,outer2,outer3,outer4]
-                    mn -= val
-                    mnsq -= val*val
+                    mn -= val/80.0
+                    mnsq -= val*val/80.0
                     #mn and mnsq now are respectively the sum and sum of squares of the cells 
                     #around the one in the middle
                     vn = mnsq-mn*mn #variance
@@ -759,7 +759,7 @@ class ActiveBeamformer(DetectionReader):
                 measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                                    noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(self.nbins, self.thetavals, self.phivals, cfar4d(self.nbins, output), 1000000)
+                dets = thresh(self.nbins, self.thetavals, self.phivals, cfar4d(self.nbins, output), 1000)
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
