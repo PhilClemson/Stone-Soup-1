@@ -21,7 +21,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import numpy as np
 from typing import Sequence
-import numba 
+from numba import njit, int64
+from numba.typed import List
 from ..base import Property
 from ..buffered_generator import BufferedGenerator
 from ..models.measurement.linear import LinearGaussian
@@ -32,15 +33,15 @@ from ..reader import DetectionReader
 
 
 # putting numba functions here has they don't seem to work as class functions
-@numba.njit
+@njit
 def calc_time_delays_core(num_sensors, fs, wave_speed, L_pulse, a, z):
-    time_delays = np.zeros((num_sensors),dtype=numba.int64)
+    time_delays = np.zeros((num_sensors),dtype=int64)
     arr = L_pulse + fs*np.sum(a * z, 1) / wave_speed
     for i in range(0, num_sensors):
         time_delays[i] = np.round(arr[i])
     return(time_delays)
     
-@numba.njit
+@njit
 def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nbins):
     DoA_grid = np.zeros((nbins[0], nbins[1]))
     for theta_ind in range(0, nbins[0]):
@@ -54,7 +55,7 @@ def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nb
             DoA_grid[theta_ind, phi_ind] = spectral_amplitude
     return(DoA_grid)
 
-@numba.njit
+@njit
 def thresh(nbins, thetavals, phivals, arr, thresh):
     detections = []
     for outer1 in range(1,nbins[0]):
@@ -64,11 +65,13 @@ def thresh(nbins, thetavals, phivals, arr, thresh):
                     if(arr[outer1,outer2,outer3,outer4]>thresh):
                         # define a detection and add it to list
                         detections.append([thetavals[outer1], phivals[outer2]])
+    print(len(detections))
     return detections
 
-@numba.njit
+@njit
 def cfar4d(nbins, arr):
     outputs = np.empty(arr.shape)
+    flag=1
     #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
     for outer1 in range(1,nbins[0]-1):
         for outer2 in range(1,nbins[1]-1):
@@ -76,21 +79,23 @@ def cfar4d(nbins, arr):
                 for outer4 in range(1,nbins[3]-1):
                     mn = 0
                     mnsq = 0
+                    numvals =0
                     #should use cumulative sums to mitigate computational cost if the ranges are larger
                     for inner1 in range(-1,2):
                         for inner2 in range(-1,2):
                             for inner3 in range(-1,2):
                                 for inner4 in range(-1,2):
                                   val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
-                                  mn += val/80.0
+                                  #mn += val/80.0
                                   mnsq += val*val/80.0
+                                  numvals +=1
                     val = arr[outer1,outer2,outer3,outer4]
-                    mn -= val/80.0
+                    #mn -= val/80.0
                     mnsq -= val*val/80.0
                     #mn and mnsq now are respectively the sum and sum of squares of the cells 
                     #around the one in the middle
-                    vn = mnsq-mn*mn #variance
-                    outputs[outer1,outer2,outer3,outer4] = mn*mn/vn #number of standard deviations squared
+                    #vn = mnsq-mn*mn #variance
+                    outputs[outer1,outer2,outer3,outer4] = val*val / mnsq
     return outputs
 
 
@@ -741,7 +746,7 @@ class ActiveBeamformer(DetectionReader):
                     conv = np.fft.irfft(F_pulse_shifted * F_sig, self.L_total, 0)
 
                     for n_r in range(0, self.nbins[2]):
-                        output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], self.nbins)
+                        output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], List(self.nbins))
                         
                         # PLACEHOLDER - very simple peak-finder to be replaced by CFAR detector #
                         # maxind = np.unravel_index(DoA_grid.argmax(), DoA_grid.shape)
@@ -759,7 +764,7 @@ class ActiveBeamformer(DetectionReader):
                 measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                                    noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(self.nbins, self.thetavals, self.phivals, cfar4d(self.nbins, output), 1000)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output), 8)
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
