@@ -21,7 +21,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import numpy as np
 from typing import Sequence
-from numba import njit, int64
+from numba import njit, int64, float64
 from numba.typed import List
 from ..base import Property
 from ..buffered_generator import BufferedGenerator
@@ -40,7 +40,7 @@ def calc_time_delays_core(num_sensors, fs, wave_speed, L_pulse, a, z):
     for i in range(0, num_sensors):
         time_delays[i] = np.round(arr[i])
     return(time_delays)
-    
+
 @njit
 def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nbins):
     DoA_grid = np.zeros((nbins[0], nbins[1]))
@@ -58,20 +58,18 @@ def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nb
 @njit
 def thresh(nbins, thetavals, phivals, arr, thresh):
     detections = []
-    for outer1 in range(1,nbins[0]):
-        for outer2 in range(1,nbins[1]):
-            for outer3 in range(1,nbins[2]):
-                for outer4 in range(1,nbins[3]):
+    for outer1 in range(0,nbins[0]-2):
+        for outer2 in range(0,nbins[1]-2):
+            for outer3 in range(0,nbins[2]-2):
+                for outer4 in range(0,nbins[3]-2):
                     if(arr[outer1,outer2,outer3,outer4]>thresh):
                         # define a detection and add it to list
-                        detections.append([thetavals[outer1], phivals[outer2]])
-    print(len(detections))
+                        detections.append([thetavals[outer1+1], phivals[outer2+1]])
     return detections
 
 @njit
-def cfar4d(nbins, arr):
-    outputs = np.empty(arr.shape)
-    flag=1
+def cfar4d(nbins, arr, dims):
+    outputs = np.empty(dims, dtype=float64)
     #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
     for outer1 in range(1,nbins[0]-1):
         for outer2 in range(1,nbins[1]-1):
@@ -95,7 +93,7 @@ def cfar4d(nbins, arr):
                     #mn and mnsq now are respectively the sum and sum of squares of the cells 
                     #around the one in the middle
                     #vn = mnsq-mn*mn #variance
-                    outputs[outer1,outer2,outer3,outer4] = val*val / mnsq
+                    outputs[outer1-1,outer2-1,outer3-1,outer4-1] = val*val / mnsq
     return outputs
 
 
@@ -711,7 +709,8 @@ class ActiveBeamformer(DetectionReader):
             
             # assign memory to arrays used in the loops
             F_pulse_shifted = np.empty([self.L_fft, self.num_sensors], dtype=complex)
-            output = np.empty([self.nbins[0], self.nbins[1], self.nbins[2], self.nbins[3]])
+            dims = [self.nbins[0], self.nbins[1], self.nbins[2], self.nbins[3]]
+            output = np.empty(dims)
             
             # PLACEHOLDER #
             # amp_max = 0
@@ -764,7 +763,8 @@ class ActiveBeamformer(DetectionReader):
                 measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                                    noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output), 8)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output, tuple(dims)), 8)
+                print(len(dets))
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
