@@ -653,7 +653,7 @@ class ActiveBeamformer(DetectionReader):
         self.preprocess_pulse()
         self.thetavals = np.linspace(-math.pi, math.pi, num=self.nbins[0])
         self.phivals = np.linspace(-math.pi/2, math.pi/2, num=self.nbins[1])
-        self.rangevals = np.linspace(int(self.window_size/(self.nbins[2]+1)), int(self.window_size - self.window_size/(self.nbins[2]+1)), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
+        self.rangevals = np.linspace(int(self.window_size/10), int(self.window_size - self.window_size/10), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
         self.Dopplervals = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=int) #SM: should be float but doppler is also used as an index offset 
 
     def preprocess_pulse(self):
@@ -665,7 +665,7 @@ class ActiveBeamformer(DetectionReader):
         # Pre-compute simulated Doppler-shifted pulses
         target_velocity = np.linspace(-100, 100, num=self.nbins[3], dtype=float)
         time_axis = np.linspace(0, self.L_pulse - 1, num=self.L_pulse)
-        spline_fit = interp1d(time_axis, pulse, kind='cubic')
+        spline_fit = interp1d(time_axis, np.flip(pulse), kind='cubic')
         self.F_pulse = np.zeros([self.L_fft, self.nbins[3]], dtype=complex)
         for n in range(0,self.nbins[3]):
             Doppler_scale = self.wave_speed/(self.wave_speed+target_velocity[n])
@@ -719,7 +719,6 @@ class ActiveBeamformer(DetectionReader):
             # range_max = 0
             # Doppler_max = 0
             # PLACEHOLDER #
-            
             for i in range(num_timesteps):
 
                 # Grab the next `window_size` lines from the reader and read it into y (also
@@ -743,7 +742,6 @@ class ActiveBeamformer(DetectionReader):
                         F_pulse_shifted[:, n] = self.F_pulse[:, n_D]
                     # calculate convolution with signals for current Doppler shift
                     conv = np.fft.irfft(F_pulse_shifted * F_sig, self.L_total, 0)
-
                     for n_r in range(0, self.nbins[2]):
                         output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], List(self.nbins))
                         
@@ -763,7 +761,7 @@ class ActiveBeamformer(DetectionReader):
                 measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                                    noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output, tuple(dims)), 8)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output, tuple(dims)), 5)
                 print(len(dets))
                 detections = set()
                 for det in dets:
