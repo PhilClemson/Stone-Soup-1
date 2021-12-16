@@ -98,14 +98,14 @@ if __name__ == '__main__':
     fig = plt.figure()
 
     # import data files
-    data_file="active_noisy.csv"
-    pulse_file="pulse1.csv"
+    data_file="active_square_noisy3.csv"
+    pulse_file="pulse2.csv"
     
     num_sensors = 9
 
     # define static sensor positions
-    X = [0, 0, 0, 0, 0, 0, 0, 0, 0]
-    Y = [0, 10, 20, 30, 40, 50, 60, 70, 80]
+    X = [0, 50, 100, 0, 50, 100, 0, 50, 100]
+    Y = [0, 0, 0, 50, 50, 50, 100, 100, 100]
     Z = [0, 0, 0, 0, 0, 0, 0, 0, 0]
     sensor_pos_sequence = []
     for i in range(0, 1):
@@ -121,7 +121,7 @@ if __name__ == '__main__':
     window = 5000  # size of sliding window in samples     
     detector = beamformers.ActiveBeamformer(data_file, pulse_file, sensor_loc=sensor_pos, fs=2000,
                                             wave_speed=1481, max_vel=100, window_size=window,
-                                            nbins=[100, 100, 100, 100])
+                                            nbins=[100, 100, 100, 1])
     
     # initialise tracker
     transition_model = CombinedLinearGaussianTransitionModel([ConstantVelocity(0.1), ConstantVelocity(0.1)])

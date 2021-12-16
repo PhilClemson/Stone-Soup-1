@@ -42,58 +42,74 @@ def calc_time_delays_core(num_sensors, fs, wave_speed, L_pulse, a, z):
     return(time_delays)
 
 @njit
-def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r, nbins):
+def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r1, r2, nbins):
     DoA_grid = np.zeros((nbins[0], nbins[1]))
     for theta_ind in range(0, nbins[0]):
         for phi_ind in range(0, nbins[1]):
             #pick out relevant pre-computed values
-            time_delays = precomp_time_delays[:, theta_ind,phi_ind] + r
+            time_delays1 = precomp_time_delays[:, theta_ind,phi_ind] + r1
+            time_delays2 = precomp_time_delays[:, theta_ind,phi_ind] + r2
             # calculate sum of the spectral amplitudes from each hydrophone for given DoA
             spectral_amplitude = 0
             for n in range(0, num_sensors):
-                spectral_amplitude = spectral_amplitude + conv[time_delays[n], n]
+                spectral_amplitude = spectral_amplitude + np.sum(conv[time_delays1[n]:time_delays2[n], n])
             DoA_grid[theta_ind, phi_ind] = spectral_amplitude
+            #print("t1={},t2={},amp={}".format(time_delays1[5],time_delays2[5],spectral_amplitude))
     return(DoA_grid)
 
 @njit
 def thresh(nbins, thetavals, phivals, arr, thresh):
     detections = []
+    #outf = open("testout.csv", "w")
+    #np.savetxt(outf, arr[:,:,40,0], delimiter=',')
+    #outf.close
     for outer1 in range(0,nbins[0]-2):
         for outer2 in range(0,nbins[1]-2):
             for outer3 in range(0,nbins[2]-2):
                 for outer4 in range(0,nbins[3]-2):
                     if(arr[outer1,outer2,outer3,outer4]>thresh):
                         # define a detection and add it to list
-                        detections.append([thetavals[outer1+1], phivals[outer2+1]])
+                        detections.append([thetavals[outer1], phivals[outer2]])
     return detections
 
 @njit
-def cfar4d(nbins, arr, dims):
-    outputs = np.empty(dims, dtype=float64)
+def cfar4d(nbins, unnorm_arr, dims):
+    outputs = np.zeros(dims, dtype=float64)
+    # normalise and scale array by multiplying by power
+    #arr = np.power(unnorm_arr / np.nanmax(unnorm_arr), 20)
+    arr = unnorm_arr
+    box_size = 2
+    half_box_size = int(box_size/2)
+    norm_const = (box_size+1)**2-1
     #should use a bespoke vectorforloop object to allow this to be applied in N-dimensions
-    for outer1 in range(1,nbins[0]-1):
-        for outer2 in range(1,nbins[1]-1):
-            for outer3 in range(1,nbins[2]-1):
-                for outer4 in range(1,nbins[3]-1):
-                    mn = 0
-                    mnsq = 0
-                    numvals =0
-                    #should use cumulative sums to mitigate computational cost if the ranges are larger
-                    for inner1 in range(-1,2):
-                        for inner2 in range(-1,2):
-                            for inner3 in range(-1,2):
-                                for inner4 in range(-1,2):
-                                  val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
-                                  #mn += val/80.0
-                                  mnsq += val*val/80.0
-                                  numvals +=1
-                    val = arr[outer1,outer2,outer3,outer4]
-                    #mn -= val/80.0
-                    mnsq -= val*val/80.0
-                    #mn and mnsq now are respectively the sum and sum of squares of the cells 
-                    #around the one in the middle
-                    #vn = mnsq-mn*mn #variance
-                    outputs[outer1-1,outer2-1,outer3-1,outer4-1] = val*val / mnsq
+    for outer1 in range(half_box_size,nbins[0]-half_box_size):
+        for outer2 in range(half_box_size,nbins[1]-half_box_size):
+            for outer3 in range(half_box_size,nbins[2]-half_box_size):
+                #for outer4 in range(half_box_size,nbins[3]-half_box_size): # disabled as not considering Doppler
+                outer4 = 0
+                mn = 0
+                mnsq = 0
+                numvals=0
+                #should use cumulative sums to mitigate computational cost if the ranges are larger
+                for inner1 in range(-half_box_size,half_box_size+1):
+                    for inner2 in range(-half_box_size,half_box_size+1):
+                        for inner3 in range(-half_box_size,half_box_size+1):
+                            #for inner4 in range(-half_box_size,half_box_size+1):
+                            inner4 = 0
+                            val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
+                            #mn += val/80.0
+                            mnsq += val*val/norm_const
+                val = arr[outer1,outer2,outer3,outer4]
+                #mn -= val/80.0
+                mnsq -= val*val/norm_const
+                #mn and mnsq now are respectively the sum and sum of squares of the cells 
+                #around the one in the middle
+                #vn = mnsq-mn*mn #variance
+                #outputs[outer1-1,outer2-1,outer3-1,outer4-1] = val*val / mnsq
+                outputs[outer1,outer2,outer3,outer4] = val*val / mnsq
+                if np.isnan(outputs[outer1,outer2,outer3,outer4]):
+                    # nan caused by 0/0 error, can safely set these values to 0 if amplitude is ~0
+                    outputs[outer1,outer2,outer3,outer4] = 0
     return outputs
 
 
@@ -653,8 +669,9 @@ class ActiveBeamformer(DetectionReader):
         self.preprocess_pulse()
         self.thetavals = np.linspace(-math.pi, math.pi, num=self.nbins[0])
         self.phivals = np.linspace(-math.pi/2, math.pi/2, num=self.nbins[1])
-        self.rangevals = np.linspace(int(self.window_size/10), int(self.window_size - self.window_size/10), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
-        self.Dopplervals = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=int) #SM: should be float but doppler is also used as an index offset 
+        #self.phivals = [0.2]
+        self.rangevals = np.linspace(int(self.window_size/100), int(self.window_size - self.window_size/100), num=self.nbins[2],dtype=int) #SM: shoudl be a float or explicitly an index
+        #self.rangevals = [1450, 1550]
 
     def preprocess_pulse(self):
         # Compute FFT of pulse (assumed to be constant)
@@ -663,7 +680,8 @@ class ActiveBeamformer(DetectionReader):
         self.L_total = self.window_size + self.L_pulse
         self.L_fft = int(np.ceil(self.L_total/2))
         # Pre-compute simulated Doppler-shifted pulses
-        target_velocity = np.linspace(-100, 100, num=self.nbins[3], dtype=float)
+        #target_velocity = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=float)
+        target_velocity = [0] # assume 0 Doppler shift for now
         time_axis = np.linspace(0, self.L_pulse - 1, num=self.L_pulse)
         spline_fit = interp1d(time_axis, np.flip(pulse), kind='cubic')
         self.F_pulse = np.zeros([self.L_fft, self.nbins[3]], dtype=complex)
@@ -712,13 +730,6 @@ class ActiveBeamformer(DetectionReader):
             dims = [self.nbins[0], self.nbins[1], self.nbins[2], self.nbins[3]]
             output = np.empty(dims)
             
-            # PLACEHOLDER #
-            # amp_max = 0
-            # theta_max = 0
-            # phi_max = 0
-            # range_max = 0
-            # Doppler_max = 0
-            # PLACEHOLDER #
             for i in range(num_timesteps):
 
                 # Grab the next `window_size` lines from the reader and read it into y (also
@@ -735,34 +746,29 @@ class ActiveBeamformer(DetectionReader):
                 # calculate FFT of each time series and pulse for re-use in convolutions within loop
                 # use length L+L_pulse to prevent edge effects
                 F_sig = np.fft.rfft(y, self.L_total, 0)
-
+                outf = open(str(i), "w")
+                
                 # shift the components in the frequency domain to simulate different Doppler shifts
                 for n_D in range(0, self.nbins[3]):
                     for n in range(0, self.num_sensors):
                         F_pulse_shifted[:, n] = self.F_pulse[:, n_D]
                     # calculate convolution with signals for current Doppler shift
                     conv = np.fft.irfft(F_pulse_shifted * F_sig, self.L_total, 0)
-                    for n_r in range(0, self.nbins[2]):
-                        output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], List(self.nbins))
-                        
-                        # PLACEHOLDER - very simple peak-finder to be replaced by CFAR detector #
-                        # maxind = np.unravel_index(DoA_grid.argmax(), DoA_grid.shape)
-                        # max_val = DoA_grid[maxind[0], maxind[1]]
-                        # if max_val > amp_max:
-                            # amp_max = max_val
-                            # theta_max = self.thetavals[maxind[0]]
-                            # phi_max = self.phivals[maxind[1]]
-                            # range_max = r
-                            # Doppler_max = Dopplervals[n_D]
-                        # PLACEHOLDER #
+                    for n_r in range(0, self.nbins[2]-1):
+                        output[:, :, n_r, n_D] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, self.rangevals[n_r], self.rangevals[n_r+1], List(self.nbins))
+                #output[:, :] = inner_loop(self.num_sensors, self.thetavals, self.phivals, conv, precomp_time_delays, 200, List(self.nbins))
+                np.savetxt(outf, output[:,0,:,0], delimiter=',')
 
                 # use CFAR algorithm to define detections
+                
+                outf.close
                 covar = CovarianceMatrix(np.array([[1, 0], [0, 1]]))
                 measurement_model = LinearGaussian(ndim_state=4, mapping=[0, 2],
                                                    noise_covar=covar)
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output, tuple(dims)), 5)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, cfar4d(List(self.nbins), output, tuple(dims)), 0.1)
                 print(len(dets))
+                #print(dets)
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
