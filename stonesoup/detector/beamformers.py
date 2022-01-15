@@ -62,7 +62,7 @@ def inner_loop(num_sensors, thetavals, phivals, conv, precomp_time_delays, r1, r
     return(DoA_grid)
 
 @njit
-def thresh(nbins, thetavals, phivals, rangevals, velvals, fs, wave_speed, arr, thresh):
+def thresh(nbins, thetavals, phivals, rangevals, velvals, fs, wave_speed, sensor_source_distance, sensor_source_angle, arr, thresh):
     detections = []
     for outer1 in range(0,nbins[0]-2):
         # elevation detection currently disabled
@@ -73,8 +73,11 @@ def thresh(nbins, thetavals, phivals, rangevals, velvals, fs, wave_speed, arr, t
                 #for outer4 in range(0,nbins[3]-2):
                     outer4=0
                     if(arr[outer1,outer2,outer3,outer4]>thresh):
+                        # calculate range based on position of source relative to array
+                        full_path_r = wave_speed*rangevals[outer3]/fs
+                        r = np.abs((sensor_source_distance**2 - full_path_r**2) / (2*(full_path_r - sensor_source_distance*math.cos(sensor_source_angle+thetavals[outer1]))))
                         # define a detection and add it to list
-                        detections.append(np.array([phivals[outer2], thetavals[outer1], wave_speed*rangevals[outer3]/fs, velvals[outer4]]))
+                        detections.append(np.array([phivals[outer2], thetavals[outer1], r, velvals[outer4]]))
     return detections
 
 @njit
@@ -660,6 +663,8 @@ class ActiveBeamformer(DetectionReader):
     fs: float = Property(doc='Sampling frequency (Hz)')
     sensor_loc: Sequence[StateVector] = Property(doc='Cartesian coordinates of the sensors in the\
                                                  format "X1 Y1 Z1; X2 Y2 Z2;...."')
+    source_loc: Sequence[StateVector] = Property(doc='Cartesian coordinates of the source in the\
+                                                 format "X1 Y1 Z1; X2 Y2 Z2;...."')
     wave_speed: float = Property(doc='Speed of wave in the medium')
     max_vel: float = Property(doc='Maximum velocity of targets')
     window_size: int = Property(doc='Window size', default=750)
@@ -750,6 +755,15 @@ class ActiveBeamformer(DetectionReader):
                 raw_data = np.asarray(self.sensor_loc[i])
                 z = np.reshape(raw_data, [self.num_sensors, 3])
                 
+                # compute distance and angle of source relative to array
+                source_loc = np.reshape(np.asarray(self.source_loc[i]),[1,3])
+                displacement = source_loc[0] - z[0,:]
+                sensor_source_distance = np.sqrt(np.sum(np.square(displacement)))
+                if sensor_source_distance != 0.0:
+                    sensor_source_angle = np.arccos(displacement[2] / sensor_source_distance)
+                else:
+                    sensor_source_angle = 0
+                
                 # pre-compute time-offsets
                 precomp_time_delays = self.calcprecomp_time_delays(z)
 
@@ -769,7 +783,7 @@ class ActiveBeamformer(DetectionReader):
 
                 # use CFAR algorithm to define detections
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(List(self.nbins), self.thetavals, self.phivals, self.rangevals, self.target_velocity, self.fs, self.wave_speed, cfar4d(List(self.nbins), output, tuple(dims)), 10)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, self.rangevals, self.target_velocity, self.fs, self.wave_speed, sensor_source_distance, sensor_source_angle, cfar4d(List(self.nbins), output, tuple(dims)), 10)
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
