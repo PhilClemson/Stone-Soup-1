@@ -16,6 +16,7 @@ import csv
 import copy
 import math
 from scipy.stats import norm, uniform
+from scipy.linalg import cho_factor, cho_solve
 from itertools import islice
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -44,6 +45,11 @@ class CaponBeamformer(DetectionReader):
     J. Capon, High-Resolution Frequency-Wavenumber Spectrum Analysis, Proc. IEEE 57(8):1408-1418
     (1969)
 
+    H. Li, J. Li, P. Stoica, Performance analysis of forward-backward matched-filterbank spectral 
+    estimators, IEEE Tran. Signal Process. 46(7):1954-1966 (1998)
+
+    B. D. Carlson, Covariance matrix estimation errors and diagonal loading in adaptive arrays, 
+    IEEE Tran. Aerosp. Electron. Syst.  24(4):397-401 (1988)
     """
 
     path: Path = Property(doc='The path to the csv file containing the raw data')
@@ -52,6 +58,7 @@ class CaponBeamformer(DetectionReader):
                               of the sensors in the format "X1, Y1, Z1\n X2, Y2, Z2\n...."')
     num_sensors: int = Property(doc='Number of sensors')
     omega: float = Property(doc='Signal frequency (Hz)')
+    loading_factor: float = Property(doc='Diagonal loading factor', default=1e-3)
     wave_speed: float = Property(doc='Speed of wave in the medium')
     window_size: int = Property(doc='Window size', default=750)
     start_time: datetime = Property(doc='Time first sample was recorded', default=datetime.now())
@@ -77,6 +84,9 @@ class CaponBeamformer(DetectionReader):
             windows = grouper(reader, self.window_size)
             sensor_loc = grouper(reader_loc, self.num_sensors)
 
+            # Exchange matrix used for forward-backward averaging of covariance 
+            J = np.fliplr(np.eye(self.num_sensors))
+
             for (window, sensor_pos) in zip(windows, sensor_loc):
                 # Grab the next `window_size` lines from the reader and read it into y (also
                 # convert to float)
@@ -87,8 +97,11 @@ class CaponBeamformer(DetectionReader):
                 c = self.wave_speed/(2*self.omega*np.pi)
 
                 # calculate covariance estimate
-                R = y.T @ y
-                R_inv = np.linalg.inv(R)
+                R     = y.T @ y
+                R_fb  = (R + (J @ R.T @ J))/2
+                delta = self.loading_factor*np.trace(R_fb)/self.num_sensors
+                R_dl  = R_fb + delta*np.eye(R_fb.shape[0])
+                chol, chol_flag = cho_factor(R_dl)
 
                 maxF = 0
                 maxtheta = 0
@@ -107,7 +120,8 @@ class CaponBeamformer(DetectionReader):
                         # steering vector
                         v = np.cos(phases) - np.sin(phases) * 1j
 
-                        F = 1 / ((self.window_size - self.num_sensors) * np.conj(v).T @ R_inv @ v)
+                        Rinv_v = cho_solve((chol, chol_flag), v)
+                        F = 1 / ((self.window_size - self.num_sensors) * np.conj(v).T @ Rinv_v)
                         if F > maxF:
                             maxF = F
                             maxtheta = theta
