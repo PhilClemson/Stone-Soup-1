@@ -69,9 +69,8 @@ def thresh(nbins, thetavals, phivals, rangevals, velvals, fs, wave_speed, sensor
         #for outer2 in range(0,nbins[1]-2):
             outer2=0
             for outer3 in range(0,nbins[2]-2):
-                # Doppler currently disabled
-                #for outer4 in range(0,nbins[3]-2):
-                    outer4=0
+                for outer4 in range(0,nbins[3]-2):
+                #outer4=0
                     if(arr[outer1,outer2,outer3,outer4]>thresh):
                         # calculate range based on position of source relative to array
                         full_path_r = wave_speed*rangevals[outer3]/fs
@@ -94,32 +93,32 @@ def cfar4d(nbins, unnorm_arr, dims):
         #for outer2 in range(half_box_size,nbins[1]-half_box_size):
             outer2 = 0
             for outer3 in range(half_box_size,nbins[2]-half_box_size):
-                #for outer4 in range(half_box_size,nbins[3]-half_box_size): # disabled as not considering Doppler
-                outer4 = 0
-                mn = 0
-                mnsq = 0
-                numvals=0
-                #should use cumulative sums to mitigate computational cost if the ranges are larger
-                for inner1 in range(-half_box_size,half_box_size+1):
-                    #for inner2 in range(-half_box_size,half_box_size+1):
-                    inner2 = 0
-                    for inner3 in range(-half_box_size,half_box_size+1):
-                        #for inner4 in range(-half_box_size,half_box_size+1):
-                        inner4 = 0
-                        val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
-                        #mn += val/80.0
-                        mnsq += val*val/norm_const
-                val = arr[outer1,outer2,outer3,outer4]
-                #mn -= val/80.0
-                mnsq -= val*val/norm_const
-                #mn and mnsq now are respectively the sum and sum of squares of the cells 
-                #around the one in the middle
-                #vn = mnsq-mn*mn #variance
-                #outputs[outer1-1,outer2-1,outer3-1,outer4-1] = val*val / mnsq
-                outputs[outer1,outer2,outer3,outer4] = val*val / mnsq
-                if np.isnan(outputs[outer1,outer2,outer3,outer4]):
-                    # nan caused by 0/0 error, can safely set these values to 0 if amplitude is ~0
-                    outputs[outer1,outer2,outer3,outer4] = 0
+                for outer4 in range(half_box_size,nbins[3]-half_box_size):
+                    #outer4 = 0
+                    mn = 0
+                    mnsq = 0
+                    numvals=0
+                    #should use cumulative sums to mitigate computational cost if the ranges are larger
+                    for inner1 in range(-half_box_size,half_box_size+1):
+                        #for inner2 in range(-half_box_size,half_box_size+1):
+                        inner2 = 0
+                        for inner3 in range(-half_box_size,half_box_size+1):
+                            for inner4 in range(-half_box_size,half_box_size+1):
+                            #inner4 = 0
+                                val = arr[outer1+inner1,outer2+inner2,outer3+inner3,outer4+inner4]
+                                #mn += val/80.0
+                                mnsq += val*val/norm_const
+                    val = arr[outer1,outer2,outer3,outer4]
+                    #mn -= val/80.0
+                    mnsq -= val*val/norm_const
+                    #mn and mnsq now are respectively the sum and sum of squares of the cells 
+                    #around the one in the middle
+                    #vn = mnsq-mn*mn #variance
+                    #outputs[outer1-1,outer2-1,outer3-1,outer4-1] = val*val / mnsq
+                    outputs[outer1,outer2,outer3,outer4] = val*val / mnsq
+                    if np.isnan(outputs[outer1,outer2,outer3,outer4]):
+                        # nan caused by 0/0 error, can safely set these values to 0 if amplitude is ~0
+                        outputs[outer1,outer2,outer3,outer4] = 0
     return outputs
 
 
@@ -693,8 +692,8 @@ class ActiveBeamformer(DetectionReader):
         self.L_total = self.window_size + self.L_pulse
         self.L_fft = int(np.ceil(self.L_total/2))
         # Pre-compute simulated Doppler-shifted pulses
-        #self.target_velocity = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=float)
-        self.target_velocity = List([0]) # assume 0 Doppler shift for now
+        self.target_velocity = np.linspace(-self.max_vel, self.max_vel, num=self.nbins[3], dtype=float)
+        #self.target_velocity = List([0]) # assume 0 Doppler shift for now
         time_axis = np.linspace(0, self.L_pulse - 1, num=self.L_pulse)
         spline_fit = interp1d(time_axis, np.flip(pulse), kind='cubic')
         self.F_pulse = np.zeros([self.L_fft, self.nbins[3]], dtype=complex)
@@ -783,11 +782,11 @@ class ActiveBeamformer(DetectionReader):
 
                 # use CFAR algorithm to define detections
                 current_time = current_time + timedelta(milliseconds=1000*self.window_size/self.fs)
-                dets = thresh(List(self.nbins), self.thetavals, self.phivals, self.rangevals, self.target_velocity, self.fs, self.wave_speed, sensor_source_distance, sensor_source_angle, cfar4d(List(self.nbins), output, tuple(dims)), 10)
+                dets = thresh(List(self.nbins), self.thetavals, self.phivals, self.rangevals, self.target_velocity, self.fs, self.wave_speed, sensor_source_distance, sensor_source_angle, cfar4d(List(self.nbins), output, tuple(dims)), 3)
                 detections = set()
                 for det in dets:
                     state_vector = StateVector(det)
                     detection = Detection(det, timestamp=current_time)
                     detections.add(detection)
-
+                
                 yield current_time, detections

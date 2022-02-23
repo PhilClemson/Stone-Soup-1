@@ -165,7 +165,7 @@ if __name__ == '__main__':
     """Pass data and parameters to detector"""
     detector = beamformers.ActiveBeamformer(data_file, pulse_file, sensor_loc=sensor_pos, fs=15000,
                                             source_loc = source_pos, wave_speed=1510, max_vel=50,
-                                            window_size=window, nbins=[100, 1, 1000, 1])
+                                            window_size=window, nbins=[100, 1, 1000, 101])
 
     """Ground truth: model setup"""
     # Set a constant velocity transition model for the targets
